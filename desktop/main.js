@@ -23,6 +23,81 @@ const DEV_URL =
   process.env.PITCHPILOT_DEV_URL || "http://localhost:5173/?view=live";
 const APP_URL = process.env.PITCHPILOT_APP_URL || ""; // e.g. built index.html
 
+function httpOrigin(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Hosted checkout must never inherit the overlay's 460x780 transparent,
+ * always-on-top canvas. Open it in a normal, full-sized window that shares
+ * the Electron session (so the callback still has the signed-in token).
+ */
+function createCheckoutWindow(url, parent) {
+  const checkout = new BrowserWindow({
+    width: 1100,
+    height: 900,
+    minWidth: 720,
+    minHeight: 600,
+    title: "PitchPilot Checkout",
+    frame: true,
+    transparent: false,
+    backgroundColor: "#ffffff",
+    alwaysOnTop: false,
+    skipTaskbar: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  // Payment pages contain sensitive data; keep them out of screen shares too.
+  checkout.setContentProtection(true);
+  checkout.loadURL(url);
+
+  // Bank / 3-D Secure flows sometimes open a popup from the checkout page.
+  // Let it open in a normal window (sharing this session) rather than a tiny
+  // default Electron popup, and preserve the opener relationship.
+  checkout.webContents.setWindowOpenHandler(() => ({
+    action: "allow",
+    overrideBrowserWindowOptions: {
+      width: 900,
+      height: 800,
+      frame: true,
+      transparent: false,
+      backgroundColor: "#ffffff",
+      alwaysOnTop: false,
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    },
+  }));
+
+  if (parent !== undefined && parent !== null && !parent.isDestroyed()) {
+    // The protected overlay is always-on-top; hide it so it cannot cover the
+    // checkout form. Restore it when the checkout window is closed.
+    parent.hide();
+    checkout.on("closed", () => {
+      if (!parent.isDestroyed()) {
+        parent.show();
+        parent.focus();
+      }
+    });
+  }
+
+  return checkout;
+}
+
 function createProtectedWindow(url) {
   const win = new BrowserWindow({
     width: 460,
@@ -54,11 +129,32 @@ function createProtectedWindow(url) {
     win.loadFile(url, { query: { view: "live" } });
   }
 
+  // `window.location.assign(paystackUrl)` in the renderer must not replace
+  // the protected overlay with the checkout page. Intercept any navigation
+  // that leaves the app origin and hand it to a normal checkout window.
+  const appOrigin = httpOrigin(url);
+  win.webContents.on("will-navigate", (event, target) => {
+    if (!target.startsWith("http://") && !target.startsWith("https://")) {
+      return;
+    }
+    const targetOrigin = httpOrigin(target);
+    if (appOrigin !== null && targetOrigin === appOrigin) {
+      return; // in-app navigation (e.g. ?view=live)
+    }
+    event.preventDefault();
+    createCheckoutWindow(target, win);
+  });
+
   // Same-origin popups (e.g. "Detached overlay window") open as additional
-  // protected windows; anything external goes to the system browser.
+  // protected windows; anything external goes to the system browser. A
+  // Paystack popup gets the full-sized checkout window instead.
   win.webContents.setWindowOpenHandler(({ url: target }) => {
     try {
       const parsed = new URL(target);
+      if (parsed.hostname === "checkout.paystack.com") {
+        createCheckoutWindow(target, win);
+        return { action: "deny" };
+      }
       if (
         parsed.hostname === "localhost" ||
         parsed.hostname === "127.0.0.1"

@@ -64,14 +64,43 @@ export function UpgradeDialog({
 
   const upgrade = useCallback(async (): Promise<void> => {
     if (busy) return;
+
+    // Open the checkout tab synchronously, before the API request. Browsers
+    // only allow popups from a direct click; waiting for the async response
+    // would let the popup blocker swallow it. The Electron shell skips this
+    // and opens a normal-sized checkout window from its main process instead.
+    const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    let checkoutWindow: Window | null = null;
+    if (window.pitchpilotDesktop !== true && !isMobile) {
+      checkoutWindow = window.open(
+        "",
+        "pitchpilot-checkout",
+        "popup=yes,width=1100,height=900",
+      );
+    }
+
     setBusy(true);
     setError(null);
     try {
       const response = await billingApi.checkout();
       if (response.mode === "paystack" && response.authorization_url !== null) {
-        window.location.assign(response.authorization_url);
+        if (checkoutWindow !== null && !checkoutWindow.closed) {
+          try {
+            checkoutWindow.opener = null;
+            checkoutWindow.focus();
+          } catch {
+            /* opener may already be detached */
+          }
+          checkoutWindow.location.replace(response.authorization_url);
+        } else {
+          // Popup blocked or closed: same-tab is still better than no
+          // checkout at all, even if the window is narrow.
+          window.location.assign(response.authorization_url);
+        }
         return; // the hosted page takes over
       }
+
+      checkoutWindow?.close();
       if (response.mode === "already_plus") {
         // A previous Paystack payment was found and activated server-side —
         // no new charge is needed.
@@ -83,6 +112,7 @@ export function UpgradeDialog({
       setDemoActivated(true);
       onUpgraded();
     } catch (err) {
+      checkoutWindow?.close();
       setError(
         err instanceof ApiError ? err.message : "Could not start the upgrade",
       );
