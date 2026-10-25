@@ -21,13 +21,16 @@ httpx>=0.27,<1.0
 websockets>=12.0
 
 # ── Copilot upgrade dependencies ──
-# Native dual audio capture (microphone + WASAPI system loopback, Windows)
-soundcard>=1.11
+# Native dual audio capture and silent server-side screen capture are NOT
+# production dependencies: hosted deployments use the browser's explicit
+# screen/tab picker and send frames over the live WebSocket. The optional
+# `soundcard`/`mss` extras are only needed by a native desktop build.
+# NumPy keeps the optional native-capture module importable in local builds;
+# it is not used by the hosted browser-audio path.
 numpy>=2.1
 # RAG knowledge base: pgvector column type for SQLAlchemy + Supabase
 pgvector>=0.3
-# Screen-capture worker for the multimodal vision pipeline
-mss>=9.0
+# Decode/validate browser-shared JPEG frames on the API.
 Pillow>=10.4
 
 # WebSocket server implementation for uvicorn. NOTE: uvicorn's default

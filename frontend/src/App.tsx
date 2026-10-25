@@ -10,10 +10,18 @@ import { AccountNotice } from "@/components/AccountNotice";
 import { AuthForm } from "@/components/AuthForm";
 import { ConsentGate } from "@/components/ConsentGate";
 import { Dashboard } from "@/components/Dashboard";
+import { LegalPage } from "@/components/LegalPage";
 import { OverlayWidget } from "@/components/OverlayWidget";
 import { SettingsForm } from "@/components/SettingsForm";
 import { Aurora } from "@/components/ui/Aurora";
 import { Logo } from "@/components/ui/Logo";
+import type { LegalView } from "@/types";
+
+const LEGAL_VIEWS: LegalView[] = ["privacy", "terms", "refunds", "support"];
+
+function isLegalView(view: string): view is LegalView {
+  return (LEGAL_VIEWS as string[]).includes(view);
+}
 
 function Splash(): JSX.Element {
   return (
@@ -37,6 +45,17 @@ function Splash(): JSX.Element {
 function Shell(): JSX.Element {
   const { user, initializing } = useAuth();
   const { view } = useApp();
+
+  // Legal and support pages are public: they must render even while the
+  // sign-in token is being restored (or when there is no token at all).
+  if (isLegalView(view)) {
+    return (
+      <>
+        <Aurora />
+        <LegalPage view={view} />
+      </>
+    );
+  }
 
   if (initializing) return <Splash />;
 

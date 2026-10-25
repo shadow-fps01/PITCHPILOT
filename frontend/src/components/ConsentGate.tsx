@@ -25,13 +25,20 @@ export function ConsentGate(): JSX.Element | null {
     user === null ||
     user.consent_current ||
     view === "live" ||
+    view === "privacy" ||
+    view === "terms" ||
+    view === "refunds" ||
+    view === "support" ||
     !user.email_verified
   ) {
     return null;
   }
 
-  const privacyUrl = import.meta.env.VITE_PRIVACY_URL;
-  const termsUrl = import.meta.env.VITE_TERMS_URL;
+  // The built-in pages are always available; env vars can point at external
+  // copies instead. Links open in a new tab so this consent dialog survives.
+  const privacyUrl =
+    import.meta.env.VITE_PRIVACY_URL?.trim() || "/?view=privacy";
+  const termsUrl = import.meta.env.VITE_TERMS_URL?.trim() || "/?view=terms";
 
   const accept = async (): Promise<void> => {
     if (!checked || busy) return;
@@ -67,9 +74,11 @@ export function ConsentGate(): JSX.Element | null {
                 Before your first live session
               </Dialog.Title>
               <Dialog.Description className="mt-1 text-xs leading-relaxed text-slate-400">
-                PitchPilot listens to your microphone and sends short audio
-                segments to a transcription service. Transcripts and coaching
-                notes are stored in your account.
+                PitchPilot listens to your microphone and, when you choose, the
+                call audio you share. Short segments are transcribed and
+                analyzed live; screen frames are analyzed and discarded.
+                Transcript excerpts and coaching notes stay in your account for
+                up to 30 days.
               </Dialog.Description>
             </div>
           </div>
@@ -89,34 +98,24 @@ export function ConsentGate(): JSX.Element | null {
               className="mt-0.5 size-4 shrink-0 accent-sky-400"
             />
             <span className="text-xs leading-relaxed text-slate-300">
-              I have permission to record this call
-              {privacyUrl !== undefined || termsUrl !== undefined ? (
-                <>
-                  {" "}
-                  and agree to the{" "}
-                  {privacyUrl !== undefined && (
-                    <a
-                      href={privacyUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
-                    >
-                      Privacy Policy
-                    </a>
-                  )}
-                  {privacyUrl !== undefined && termsUrl !== undefined && " and "}
-                  {termsUrl !== undefined && (
-                    <a
-                      href={termsUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
-                    >
-                      Terms
-                    </a>
-                  )}
-                </>
-              ) : null}
+              I have permission to record this call and agree to the{" "}
+              <a
+                href={privacyUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+              >
+                Privacy Policy
+              </a>{" "}
+              and{" "}
+              <a
+                href={termsUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+              >
+                Terms
+              </a>
               .
             </span>
           </label>

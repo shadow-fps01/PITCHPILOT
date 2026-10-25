@@ -5,8 +5,9 @@
 PitchPilot is an AI-powered SaaS MVP that sits as a lightweight floating overlay
 while you pitch on calls. It listens to your microphone, transcribes in real
 time, and flashes translucent coaching cues — *"Slow down"*, *"You're saying
-'um' too much"*, *"Time to mention the pricing discount"* — that only you can
-see. Your screen-shared call window stays completely clean.
+'um' too much"*, *"Time to mention the pricing discount"* — in a private
+overlay beside the call. Share only the call tab or window and the overlay
+stays out of the shared view; a whole-screen share will include it.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -126,8 +127,9 @@ CORS concerns and the overlay's live stream works out of the box.
    use the Electron shell (`desktop/`) instead.
 5. Click **Start speaking** for mic-only coaching, or **Share screen + call
    audio** to share the call tab/window and its audio. In Chrome/Edge, tick
-   **Share system audio** in the picker. PitchPilot mixes that audio with your
-   mic and sends downscaled screen frames for live vision.
+   **Share system audio** in the picker. PitchPilot keeps the mic and shared
+   call audio as separate source streams (so only your voice drives WPM/filler
+   metrics) and sends downscaled screen frames for live vision.
 
 > **Zero-API-key demo mode** — with no STT keys configured, the backend's
 > mock provider streams a simulated filler-heavy pitch (~180 WPM), so pacing
@@ -189,7 +191,10 @@ $env:PYTHONPATH='.'; .\.venv\Scripts\python scripts\groq_stt_test.py
 ```
 
 The browser captures the mic via `AudioWorklet`, downsamples to 16 kHz 16-bit
-mono PCM, and streams frames every ~160 ms.
+mono PCM, and streams frames every ~160 ms. When a call tab/window is shared,
+its audio uses a second worklet and is tagged as the other party; only mic
+frames feed the speaking coach, while both streams inform copilot answers and
+next-topic anticipation.
 
 ## Script-auditor LLM
 
@@ -207,25 +212,24 @@ your outline/keywords):
 The overlay is a **dialogue box** — think Cluely, built into PitchPilot:
 
 - **Proactive suggestions** — while you speak, a copilot engine watches the
-  rolling call transcript (both sides with native capture) *and* the live
-  screen-vision feed. When the other party asks a question, raises an
-  objection (pricing, competitors, "think about it"…), or the conversation
-  needs a next move, it posts a ready-to-speak suggestion straight into the
-  dialogue: *"Say this — …"*.
+  rolling call transcript (your mic, plus the other party when you share call
+  audio) *and* the latest screen context. When the other party asks a question,
+  raises an objection (pricing, competitors, "think about it"…), or the
+  conversation needs a next move, it posts a ready-to-speak suggestion straight
+  into the dialogue: *"Say this — …"*.
 - **Ask anything** — type into the box at the bottom (or tap the quick chips:
   *Answer that* / *What should I say next?* / *See my screen*). The copilot
   answers using the transcript, your script outline and — with screen vision
-  on — a **fresh screenshot taken at ask-time**.
+  on — the **latest screen context**.
 - **Screen share control** — the overlay's **Share screen + call audio**
   button starts/stops browser capture and the vision worker live, no restart.
 - **One feed** — coaching cues (fillers, pacing) and RAG "Next up" cards
   flow through the same dialogue as compact system lines. Everything is
   persisted as `COPILOT_ASSIST` session events and shown in the session
   detail view.
-- **Share-safe by design** — the dialogue lives in the protected overlay
-  window (or the Electron shell), never in your screen share. When using
-  browser sharing, pick only the call tab/window; sharing your entire screen
-  can show the overlay to the other party.
+- **Share-safe by design** — the dialogue lives in the overlay window. When
+  using browser sharing, pick only the call tab/window; sharing your entire
+  screen includes the overlay, and the UI shows a warning when that happens.
 
 LLM chain: **Azure OpenAI (gpt-4o) → OpenRouter → keyless heuristic
 fallback** — the same escalation used by the script auditor, so it works
@@ -291,8 +295,12 @@ Client → Server (JSON):
 | ---------- | ---------------------------------------------------- |
 | `ping`     | `{"type":"ping","timestamp":...}` heartbeat          |
 | `stop`     | `{"type":"stop"}` — end session gracefully           |
-| `capture`  | `{"type":"capture","action":"start"\|"stop"}` native dual-audio |
+| `capture`  | Desktop-only native dual-audio; the hosted UI does not use it |
 | `ask`      | `{"type":"ask","id":"...","text":"..."}` copilot question |
+
+Binary audio frames are `PPA1` + one source byte (`1` presenter/mic,
+`2` other party/shared call audio) + 16 kHz PCM16. Untagged legacy frames are
+treated as presenter audio.
 
 **Resilience** — the client reconnects with exponential backoff (1 s → 15 s,
 ±20 % jitter) while buffering audio frames; the server keeps the session's
@@ -308,6 +316,7 @@ dropped mid-call connection resumes the *same* session.
 | `GET`    | `/api/auth/me`               | Current user (+ plan, consent)   |
 | `POST`   | `/api/auth/forgot-password`  | Request a reset link (generic)   |
 | `POST`   | `/api/auth/reset-password`   | Set a new password (single-use)  |
+| `POST`   | `/api/auth/change-password`  | Change password; returns fresh JWT |
 | `POST`   | `/api/auth/consent`          | Record recording consent         |
 | `GET`    | `/api/auth/export`           | Download account data (JSON)     |
 | `DELETE` | `/api/auth/account`          | Delete account + cancel billing  |
@@ -395,7 +404,7 @@ backend/
     schemas/      Pydantic v2 request/response + WS protocol models
     config/       Pydantic Settings (.env)
     db/            async engine + session factory
-  alembic/         async migrations (0001_initial_tables · 0002_knowledge_cards · 0003_plus_billing · 0004_email_verification · 0005_account_lifecycle)
+  alembic/         async migrations (0001_initial_tables · 0002_knowledge_cards · 0003_plus_billing · 0004_email_verification · 0005_account_lifecycle · 0006_retention_copy)
 frontend/
   src/
     components/   Dashboard · UpgradeDialog (paywall) · OverlayWidget (copilot dialogue box) · AnalyticsCard · SettingsForm · AuthForm · WpmGauge · CueToast · Teleprompter
@@ -410,13 +419,13 @@ frontend/
 
 The five upgrade features integrate into the existing loops — no separate app:
 
-### F1 — Native dual audio capture (mic + system loopback)
-`app/services/capture.py` — a background `soundcard` (WASAPI) service that
-captures the microphone **and** the system-audio loopback simultaneously,
-mixes both channels, resamples to 16 kHz mono PCM and feeds ~50 ms frames
-straight into the live STT provider (sub-200 ms chunking). Opt in with
-`AUDIO_CAPTURE_ENABLED=true`; in the overlay click **Native capture** — no
-browser mic needed, and both sides of the call get transcribed.
+### F1 — Optional native dual audio capture (desktop only)
+`app/services/capture.py` is retained for a native desktop build. It uses
+optional `soundcard` bindings to capture the microphone **and** system-audio
+loopback, resamples to 16 kHz mono PCM, and feeds the live STT provider. The
+hosted web app does not use it, does not ship `soundcard`, and has no **Native
+capture** button; browser sharing is the supported path. `numpy` remains only
+so the optional module stays importable in local builds.
 
 ### F2 — Screen-share-invisible overlay (web + Electron)
 Two flavours, same goal — you see the copilot, your call never does:
@@ -461,13 +470,16 @@ script with an outline is active.
 
 ### F5 — Browser screen vision (client-captured, in-memory)
 `useAudioRecorder.ts` requests a screen/tab with
-`getDisplayMedia({video:true,audio:true})`, mixes the shared audio with the mic,
-and sends downscaled JPEG frames over the live WebSocket. `app/services/vision.py`
-analyzes the latest frame in memory, perceptual-hash gates unchanged frames,
-rate-limits API calls, and feeds the description into the copilot,
-script-auditor and RAG prompts. Frames are never persisted.
+`getDisplayMedia({video:true,audio:true})`, keeps the shared audio on its own
+source stream, and sends downscaled JPEG frames over the live WebSocket.
+`app/services/vision.py` analyzes the latest frame in memory, perceptual-hash
+gates unchanged frames, rate-limits API calls, and feeds the description into
+the copilot, script-auditor and RAG prompts. Frames are never persisted. The
+UI detects `displaySurface === "monitor"` and warns that a whole-screen share
+includes the overlay.
 
-Server-side `mss` capture is legacy/desktop-only and off in the hosted app.
+Server-side `mss` capture is legacy/desktop-only, is not a production
+dependency, and is off in the hosted app.
 **No agent prompt is hardcoded** — every prompt lives in settings and can be
 overridden from `backend/.env`:
 
@@ -569,6 +581,22 @@ docker compose up -d --build
   registration (existing accounts can still sign in), or keep it on and list
   invited addresses in `SIGNUP_ALLOWLIST` (JSON array). Registration is checked
   server-side.
+- **Retention and abandoned sessions**: when
+  `RETENTION_CLEANUP_ENABLED=true`, a low-frequency job deletes
+  transcript-bearing session events after `DATA_RETENTION_DAYS` (default 30)
+  while keeping session summaries, and closes sessions with no live state after
+  `STALE_SESSION_HOURS` (default 12). The registry also finalizes every live
+  session during graceful shutdown. Keep cleanup **false** for a local instance
+  pointed at a shared database.
+- **Public legal/support pages**: the SPA serves built-in pages at
+  `/?view=privacy`, `/?view=terms`, `/?view=refunds`, and `/?view=support`.
+  They are reachable signed out and linked from sign-in, consent, settings, and
+  the dashboard. Set `VITE_SUPPORT_EMAIL` to a monitored inbox.
+- **Password change + session revocation**: Settings has an authenticated
+  password-change form. It verifies the current password, bumps
+  `users.token_version`, revokes outstanding WebSocket tickets, and returns a
+  fresh token so the current browser stays signed in while other devices are
+  signed out. A password reset uses the same version bump.
 - **Password reset + session revocation**: reset links are single-use and
   expire after `PASSWORD_RESET_TOKEN_MINUTES` (default 30). A successful reset
   increments `users.token_version`, immediately invalidating every old access
@@ -642,8 +670,11 @@ REQUIRE_EMAIL_VERIFICATION=false             # email delivery is off until a dom
 PASSWORD_RESET_TOKEN_MINUTES=30
 REQUIRE_RECORDING_CONSENT=true
 CONSENT_VERSION=2026-10-24
-SIGNUPS_ENABLED=true                         # false = private pilot
+SIGNUPS_ENABLED=false                        # private pilot; existing users still sign in
 SIGNUP_ALLOWLIST=[]                          # or ["you@example.com"]
+DATA_RETENTION_DAYS=30
+STALE_SESSION_HOURS=12
+RETENTION_CLEANUP_ENABLED=true
 TRUST_PROXY_HEADERS=true                     # API is behind Render's proxy
 AUDIO_CAPTURE_ENABLED=false
 VISION_ENABLED=false
@@ -669,9 +700,9 @@ the build. The default CSP allows `https://*.onrender.com` and
 `wss://*.onrender.com`; if you use a custom API domain, update `connect-src`
 there.
 
-The consent dialog links to the legal pages only when
-`VITE_PRIVACY_URL` / `VITE_TERMS_URL` are set at build time. Until those real
-pages exist, it still records the presenter's permission confirmation.
+The consent dialog links to the built-in privacy and terms pages by default.
+Set `VITE_PRIVACY_URL` / `VITE_TERMS_URL` only if you host external copies.
+The built-in pages describe subprocessor categories rather than vendor names.
 
 **Free-tier reality check:** Render Free sleeps after 15 minutes idle (≈1 min
 cold start), has 0.1 CPU / 512 MB RAM, 750 instance hours/month, 5 GB outbound,

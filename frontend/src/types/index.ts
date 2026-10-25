@@ -340,7 +340,13 @@ export interface DialogueEntry {
 
 export type WsStatus = "idle" | "connecting" | "open" | "reconnecting" | "closed";
 
-export type ViewMode = "dashboard" | "live" | "settings";
+/** Which capture stream a PCM frame came from. */
+export type AudioSource = "presenter" | "other";
+
+/** A public legal/support page. */
+export type LegalView = "privacy" | "terms" | "refunds" | "support";
+
+export type ViewMode = "dashboard" | "live" | "settings" | LegalView;
 
 export interface AppSettings {
   overlayOpacity: number; // 0.5 – 0.95

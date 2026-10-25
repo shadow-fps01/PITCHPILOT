@@ -29,7 +29,6 @@ import io
 import time
 
 import httpx
-import mss
 import PIL.Image
 from loguru import logger
 
@@ -47,8 +46,15 @@ class _RateLimited(Exception):
 
 
 def _grab_frame() -> tuple[bytes, int] | None:
-    """Capture monitor 1 → downscaled JPEG + 64-bit average hash (thread)."""
+    """Capture monitor 1 → downscaled JPEG + 64-bit average hash (thread).
+
+    `mss` is deliberately not a production dependency: hosted deployments use
+    browser-shared frames only. A native desktop build can install it
+    separately; without it this helper simply returns `None`.
+    """
     try:
+        import mss  # optional native-capture extra
+
         with mss.mss() as sct:
             monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
             shot = sct.grab(monitor)

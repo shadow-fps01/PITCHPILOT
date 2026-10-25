@@ -54,6 +54,17 @@ class Settings(BaseSettings):
     auto_create_tables: bool = True
     dns_cache_enabled: bool = True   # in-process getaddrinfo cache + stale-on-error
 
+    # ── Data retention / abandoned sessions ───────────────────────────
+    # Transcript excerpts and coaching notes are deleted after this many
+    # days. Session summaries (duration/counts) remain so history still works.
+    data_retention_days: int = 30
+    # A session that never reconnects is closed out after this many hours so
+    # it cannot stay "Live" forever. Set RETENTION_CLEANUP_ENABLED=false for
+    # a local instance pointed at a shared database you must not mutate.
+    stale_session_hours: int = 12
+    retention_cleanup_enabled: bool = True
+    retention_cleanup_interval_hours: float = 24.0
+
     # ── CORS ──────────────────────────────────────────────────────────
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 

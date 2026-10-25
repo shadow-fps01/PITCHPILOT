@@ -11,14 +11,15 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ClientMessage, ServerMessage, WsStatus } from "@/types";
+import type { AudioSource, ClientMessage, ServerMessage, WsStatus } from "@/types";
 
 export interface UseWebSocket {
   status: WsStatus;
   reconnectAttempt: number;
   connect: () => void;
   disconnect: (graceful: boolean) => void;
-  sendAudio: (chunk: ArrayBuffer) => void;
+  /** Tagged PCM frame: presenter/mic or other party/shared call audio. */
+  sendAudio: (chunk: ArrayBuffer, source?: AudioSource) => void;
   /** Send a JSON control message (ping/stop/capture) when the socket is open. */
   sendControl: (message: ClientMessage) => void;
   /** Send one browser-shared screen frame; dropped if the socket is down. */
@@ -41,6 +42,21 @@ const MAX_DELAY_MS = 15000;
 const PING_INTERVAL_MS = 15000;
 const PONG_WATCHDOG_MS = 35000;
 const MAX_QUEUED_CHUNKS = 60;
+
+// `PPA1` + source byte + PCM16. The server treats untagged legacy frames as
+// presenter audio, so a stale tab cannot break the live stream.
+const AUDIO_MAGIC = new Uint8Array([0x50, 0x50, 0x41, 0x31]);
+const AUDIO_PRESENTER = 1;
+const AUDIO_OTHER = 2;
+
+function tagAudioFrame(chunk: ArrayBuffer, source: AudioSource): ArrayBuffer {
+  const tagged = new Uint8Array(AUDIO_MAGIC.length + 1 + chunk.byteLength);
+  tagged.set(AUDIO_MAGIC, 0);
+  tagged[AUDIO_MAGIC.length] =
+    source === "other" ? AUDIO_OTHER : AUDIO_PRESENTER;
+  tagged.set(new Uint8Array(chunk), AUDIO_MAGIC.length + 1);
+  return tagged.buffer;
+}
 
 export function useWebSocket({
   url,
@@ -266,18 +282,22 @@ export function useWebSocket({
     [clearTimers, sendJson],
   );
 
-  const sendAudio = useCallback((chunk: ArrayBuffer): void => {
-    const ws = wsRef.current;
-    if (ws !== null && ws.readyState === WebSocket.OPEN) {
-      ws.send(chunk);
-      return;
-    }
-    // Buffer during outages; shed the oldest frames if the cap is hit.
-    queueRef.current.push(chunk);
-    if (queueRef.current.length > MAX_QUEUED_CHUNKS) {
-      queueRef.current.shift();
-    }
-  }, []);
+  const sendAudio = useCallback(
+    (chunk: ArrayBuffer, source: AudioSource = "presenter"): void => {
+      const tagged = tagAudioFrame(chunk, source);
+      const ws = wsRef.current;
+      if (ws !== null && ws.readyState === WebSocket.OPEN) {
+        ws.send(tagged);
+        return;
+      }
+      // Buffer during outages; shed the oldest frames if the cap is hit.
+      queueRef.current.push(tagged);
+      if (queueRef.current.length > MAX_QUEUED_CHUNKS) {
+        queueRef.current.shift();
+      }
+    },
+    [],
+  );
 
   const sendScreenFrame = useCallback(
     (image: string): void => {

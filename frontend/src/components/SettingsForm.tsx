@@ -13,8 +13,10 @@ import {
   Download,
   Eye,
   Gauge,
+  KeyRound,
   Loader2,
   Mail,
+  ShieldCheck,
   Sparkles,
   Timer,
   Trash2,
@@ -23,6 +25,7 @@ import {
 
 import { useApp } from "@/context/AppContext";
 import { useAuth } from "@/context/AuthContext";
+import { LegalLinks } from "@/components/LegalLinks";
 import { Logo } from "@/components/ui/Logo";
 import { ApiError, authApi } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -122,13 +125,19 @@ function SensitivitySelector({
 
 export function SettingsForm(): JSX.Element {
   const { settings, updateSettings, setView } = useApp();
-  const { user, logout } = useAuth();
+  const { user, changePassword, logout } = useAuth();
   const [saved, setSaved] = useState(false);
   const firstRenderRef = useRef(true);
 
   const [exporting, setExporting] = useState(false);
   const [accountInfo, setAccountInfo] = useState<string | null>(null);
   const [accountError, setAccountError] = useState<string | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordInfo, setPasswordInfo] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deletePassword, setDeletePassword] = useState("");
   const [deleteBusy, setDeleteBusy] = useState(false);
@@ -171,6 +180,43 @@ export function SettingsForm(): JSX.Element {
       );
     } finally {
       setExporting(false);
+    }
+  };
+
+  const updatePassword = async (
+    event: FormEvent<HTMLFormElement>,
+  ): Promise<void> => {
+    event.preventDefault();
+    if (passwordBusy) return;
+    setPasswordError(null);
+    setPasswordInfo(null);
+
+    if (newPassword !== confirmPassword) {
+      setPasswordError("Those new passwords do not match.");
+      return;
+    }
+    if (newPassword === currentPassword) {
+      setPasswordError("Choose a password you haven't used for this account.");
+      return;
+    }
+
+    setPasswordBusy(true);
+    try {
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setPasswordInfo(
+        "Password updated. Other devices have been signed out.",
+      );
+    } catch (err) {
+      setPasswordError(
+        err instanceof ApiError
+          ? err.message
+          : "Could not update your password — please try again.",
+      );
+    } finally {
+      setPasswordBusy(false);
     }
   };
 
@@ -386,6 +432,95 @@ export function SettingsForm(): JSX.Element {
           )}
         </div>
 
+        <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-xl">
+          <div className="flex items-start gap-3">
+            <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-sky-300">
+              <KeyRound size={15} />
+            </span>
+            <div>
+              <p className="text-sm font-semibold text-slate-100">Password</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-slate-500">
+                Use a unique password. Changing it signs out every other device
+                and revokes live connection links.
+              </p>
+            </div>
+          </div>
+
+          <form onSubmit={updatePassword} className="mt-4 flex flex-col gap-3">
+            <label className="block">
+              <span className="field-label">Current password</span>
+              <input
+                type="password"
+                required
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(event) => setCurrentPassword(event.target.value)}
+                placeholder="Your current password"
+                className="input"
+              />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="field-label">New password</span>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  placeholder="At least 8 characters"
+                  className="input"
+                />
+              </label>
+              <label className="block">
+                <span className="field-label">Confirm new password</span>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={confirmPassword}
+                  onChange={(event) => setConfirmPassword(event.target.value)}
+                  placeholder="Repeat new password"
+                  className="input"
+                />
+              </label>
+            </div>
+
+            {passwordInfo !== null && (
+              <p className="flex items-center gap-2 rounded-xl border border-emerald-400/25 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-200">
+                <ShieldCheck size={13} /> {passwordInfo}
+              </p>
+            )}
+            {passwordError !== null && (
+              <p className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                {passwordError}
+              </p>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                type="submit"
+                disabled={
+                  passwordBusy ||
+                  currentPassword.length === 0 ||
+                  newPassword.length < 8 ||
+                  confirmPassword.length < 8
+                }
+                className="btn-outline text-xs"
+              >
+                {passwordBusy ? (
+                  <Loader2 size={14} className="animate-spin" />
+                ) : (
+                  <KeyRound size={14} />
+                )}
+                Update password
+              </button>
+            </div>
+          </form>
+        </div>
+
         <div className="rounded-2xl border border-rose-500/20 bg-rose-500/[0.04] p-4 backdrop-blur-xl">
           <div className="flex items-start gap-3">
             <span className="mt-0.5 rounded-xl border border-rose-400/20 bg-rose-400/10 p-2 text-rose-300">
@@ -468,6 +603,7 @@ export function SettingsForm(): JSX.Element {
       <p className="mt-6 text-xs leading-relaxed text-slate-600">
         Coaching adapts to your pace and delivery as you speak.
       </p>
+      <LegalLinks className="mt-3" />
     </div>
   );
 }

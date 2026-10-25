@@ -186,8 +186,40 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
     warmup_task = asyncio.create_task(_warm_db())
 
+    # Retention is opt-in so a local instance cannot mutate a shared database.
+    retention_task: asyncio.Task[None] | None = None
+    if settings.retention_cleanup_enabled:
+        from app.services.retention import cleanup_loop
+
+        retention_task = asyncio.create_task(cleanup_loop(settings))
+        logger.info(
+            "Retention cleanup: enabled "
+            f"({settings.data_retention_days}-day transcript retention, "
+            f"{settings.stale_session_hours}h abandoned-session cutoff)"
+        )
+    else:
+        logger.info("Retention cleanup: disabled (RETENTION_CLEANUP_ENABLED=false)")
+
     yield
     warmup_task.cancel()
+    if retention_task is not None:
+        retention_task.cancel()
+        try:
+            await retention_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+    # Persist an end time for every live session before the process exits.
+    # Without this, a Render restart leaves those rows looking "Live" forever.
+    from app.services.session_registry import registry
+
+    try:
+        await asyncio.wait_for(registry.finalize_all(), timeout=8.0)
+    except asyncio.TimeoutError:
+        logger.warning("Timed out finalizing live sessions during shutdown")
+    except Exception as exc:  # noqa: BLE001 — shutdown must continue
+        logger.warning(f"Live-session shutdown finalization failed: {exc}")
+
     if vision_worker is not None:
         from app.services.vision import set_shared_worker
 

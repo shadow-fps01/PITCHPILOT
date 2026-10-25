@@ -383,7 +383,10 @@ class CopilotChat:
         self.on_message = on_message  # rebound per (re)connection
         self.on_delta = on_delta  # streamed answer tokens (rebound per connection)
 
-        self._transcript: deque[str] = deque(maxlen=40)  # final chunks
+        # Final chunks are stored with their speaker so the copilot can tell
+        # the presenter's words from the other party's. The coach's analytics
+        # deliberately consume only the presenter stream.
+        self._transcript: deque[tuple[str, str]] = deque(maxlen=40)
         self._task: asyncio.Task[None] | None = None
         self._last_suggest_t: float = -1e9
         self._last_suggest_words: int = 0
@@ -407,9 +410,18 @@ class CopilotChat:
             logger.warning(f"Copilot on_delta failed: {exc}")
 
     # ── Proactive path (transcript-driven) ────────────────────────────
-    def feed_final(self, text: str) -> None:
-        """Add a final transcript chunk; maybe fire a proactive suggestion."""
-        self._transcript.append(text)
+    def feed_final(self, text: str, speaker: str = "presenter") -> None:
+        """Add a final transcript chunk; maybe fire a proactive suggestion.
+
+        `speaker` is either `"presenter"` (microphone) or `"other"` (the
+        shared call/system-audio stream). Both are used as copilot context,
+        but only the presenter stream feeds the speaking coach's metrics.
+        """
+        text = text.strip()
+        if not text:
+            return
+        speaker = "other" if speaker == "other" else "presenter"
+        self._transcript.append((speaker, text))
         self._total_words += len(text.split())
         if not self._settings.copilot_enabled:
             return
@@ -432,8 +444,16 @@ class CopilotChat:
         self._last_suggest_words = self._total_words
         self._task = asyncio.create_task(self._generate_suggestion(trigger))
 
+    def _transcript_text(self) -> str:
+        """Format the rolling transcript with explicit speaker labels."""
+        lines = [
+            f"{'Other party' if speaker == 'other' else 'Presenter'}: {text}"
+            for speaker, text in self._transcript
+        ]
+        return "\n".join(lines)[-1600:]
+
     async def _generate_suggestion(self, trigger: str) -> None:
-        transcript = " ".join(self._transcript)[-1600:]
+        transcript = self._transcript_text()
         if len(transcript.split()) < self._settings.copilot_min_words_to_suggest:
             return
         original_trigger = trigger
@@ -496,7 +516,7 @@ class CopilotChat:
         `on_delta` as they arrive, then a final `answer` insight closes the
         message (same `id`). Falls back to the keyless heuristic on any error.
         """
-        transcript = " ".join(self._transcript)[-1600:]
+        transcript = self._transcript_text()
         screen: str | None = None
         if self.fresh_screen_provider is not None:
             try:

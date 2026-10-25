@@ -20,8 +20,9 @@ real money.
 
 - [x] Live transcription through Groq (`whisper-large-v3-turbo`).
 - [x] Browser screen sharing: screen/tab + system audio via `getDisplayMedia`,
-      mixed with the mic, with downscaled JPEG frames analyzed in memory. No
-      server-side host-screen capture in the hosted deployment.
+      kept as a separate source stream from the mic, with downscaled JPEG
+      frames analyzed in memory. No server-side host-screen capture in the
+      hosted deployment. Whole-screen shares are flagged in the overlay.
 - [x] Paystack checkout + webhook handling. Test and live keys use the same
       code path; the plan cache is keyed by key fingerprint so swapping modes
       cannot reuse the wrong plan.
@@ -30,6 +31,14 @@ real money.
       while no provider is configured.
 - [x] Password reset: single-use, expiring links; reset revokes old JWTs and
       WebSocket tickets.
+- [x] Password change from Settings: verifies the current password, bumps
+      `token_version`, revokes WebSocket tickets, and returns a fresh token so
+      the current browser stays signed in.
+- [x] Data retention: transcript-bearing events are deleted after 30 days;
+      session summaries remain. Abandoned sessions are closed after 12 hours.
+- [x] Public privacy, terms, refund, and support pages are built into the SPA
+      at `/?view=privacy|terms|refunds|support` and linked from sign-in,
+      consent, settings, and the dashboard.
 - [x] Recording consent: blocking first-run dialog, server-side gate on
       `POST /api/sessions` and the WebSocket handshake, timestamp + version
       stored on the user.
@@ -72,12 +81,13 @@ These cannot be completed from the codebase alone.
       audio. Safari/Firefox may not expose system audio. Tell users to share
       only the call tab/window and tick “Share system audio”; sharing the whole
       screen can show the PitchPilot overlay.
-- [ ] **Legal**: privacy policy, terms, recording consent language, retention
-      and deletion policy, subprocessors (Groq, Azure/OpenRouter, Gemini,
-      Paystack, Resend, Neon/Supabase), support contact.
-- [ ] **Legal URLs in the UI**: set `VITE_PRIVACY_URL` and `VITE_TERMS_URL` at
-      frontend build time. Until then the consent dialog still records the
-      permission confirmation but does not link to pages.
+- [ ] **Legal review**: the built-in privacy, terms, refund, and support pages
+      are ready to use and describe subprocessor categories without naming
+      vendors. Have a qualified adviser review them for your jurisdiction.
+      Confirm the support inbox (`VITE_SUPPORT_EMAIL`) is monitored.
+- [ ] **Legal URLs**: built-in pages are the default. Only set
+      `VITE_PRIVACY_URL` / `VITE_TERMS_URL` if you replace them with external
+      copies at frontend build time.
 - [ ] **Observability**: optional Sentry/UptimeRobot account; `/api/ready` is
       the endpoint to monitor for database health.
 - [ ] **Desktop release** (only if shipping Electron): Windows code signing
@@ -105,7 +115,10 @@ These cannot be completed from the codebase alone.
      `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, and `EMAIL_FROM`, then enable
      verification. Keep `REQUIRE_EMAIL_VERIFICATION=false` until then.
    - `REQUIRE_RECORDING_CONSENT=true`, `CONSENT_VERSION`
-   - `SIGNUPS_ENABLED=true` or `false`, `SIGNUP_ALLOWLIST`
+   - `SIGNUPS_ENABLED=false` for a private pilot (existing accounts still sign
+     in), or `true` plus `SIGNUP_ALLOWLIST`
+   - `DATA_RETENTION_DAYS=30`, `STALE_SESSION_HOURS=12`,
+     `RETENTION_CLEANUP_ENABLED=true`
    - `TRUST_PROXY_HEADERS=true` (Render is the only ingress)
    - `AUDIO_CAPTURE_ENABLED=false`, `VISION_ENABLED=false`
    - `VISION_CLIENT_ENABLED=true`, `VISION_SERVER_CAPTURE_ENABLED=false`
@@ -120,7 +133,8 @@ These cannot be completed from the codebase alone.
 2. Build: `npm ci && npm run build`.
 3. Output: `dist`.
 4. Environment: `VITE_API_BASE_URL=https://<api-host>/api`.
-5. Optional: `VITE_PRIVACY_URL`, `VITE_TERMS_URL`.
+5. Optional: `VITE_PRIVACY_URL`, `VITE_TERMS_URL`; set
+   `VITE_SUPPORT_EMAIL` to the monitored support inbox.
 6. Confirm `frontend/public/_headers` allows the API origin in
    `connect-src` (default `https://*.onrender.com` / `wss://*.onrender.com`)
    and keeps `Permissions-Policy: display-capture=(self)` so the screen picker
@@ -145,8 +159,16 @@ Also verify manually:
       share only the call tab/window with system audio, and confirm the screen
       chip plus a screen-aware answer. Stop sharing and confirm mic-only
       coaching continues.
+- [ ] Share the whole screen once and confirm the amber “whole screen visible”
+      chip and the warning appear.
+- [ ] With call audio shared, have the other party speak. Confirm their words
+      reach copilot/anticipation but do not change your WPM or filler count.
 - [ ] Reconnect the WebSocket mid-session, including while screen sharing; the
       share must re-arm automatically.
+- [ ] Change the password from Settings; confirm this browser stays signed in,
+      another browser is signed out, and a previously minted WS ticket fails.
+- [ ] Open `/?view=privacy`, `/?view=terms`, `/?view=refunds`, and
+      `/?view=support` while signed out.
 - [ ] Hit the free quota and see the upgrade path.
 - [ ] Demo upgrade works (pilot) or Paystack test checkout opens and the
       callback verifies `reference`/`trxref` (paid).
@@ -184,9 +206,12 @@ Also verify manually:
       change should be needed.
 - [ ] Paystack webhook delivery monitoring, refund/cancellation policy, and
       tax/business details.
-- [ ] Verified Resend domain and a support inbox.
-- [ ] Privacy/terms/consent pages that cover screen frames, system audio,
-      subprocessors, retention, and deletion.
+- [ ] Verified Resend domain and a monitored support inbox.
+- [ ] Legal review of the built-in privacy/terms/refund/consent pages, which
+      cover screen frames, system audio, subprocessor categories, retention,
+      and deletion.
+- [ ] Confirm `RETENTION_CLEANUP_ENABLED=true` and that the 30-day cleanup job
+      is visible in logs after a deploy.
 - [ ] Rotate any provider key that may have appeared in old logs; the API now
       sends Gemini keys in headers, never query strings.
 - [ ] Error tracking and uptime alerts.

@@ -43,6 +43,7 @@ import { useApp } from "@/context/AppContext";
 import { ApiError, billingApi, scriptsApi, sessionsApi } from "@/lib/api";
 import { openPipOverlay, pipSupported } from "@/lib/pipOverlay";
 import { AnalyticsCard } from "@/components/AnalyticsCard";
+import { LegalLinks } from "@/components/LegalLinks";
 import { UpgradeDialog } from "@/components/UpgradeDialog";
 import { Logo } from "@/components/ui/Logo";
 import { Waveform } from "@/components/ui/Waveform";
@@ -561,8 +562,9 @@ export function Dashboard(): JSX.Element {
                 </h2>
                 <p className="mt-2 text-sm leading-relaxed text-slate-400">
                   Pick an outline so PitchPilot can remind you of missed talking
-                  points, then start speaking. Cues appear on the overlay only —
-                  they never show on a screen share of the call window.
+                  points, then start speaking. Cues appear only in this overlay;
+                  share just the call tab or window so they stay out of the
+                  shared view.
                 </p>
               </div>
               <div className="hidden items-center gap-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 sm:flex">
@@ -620,8 +622,8 @@ export function Dashboard(): JSX.Element {
                   className="btn-outline h-[42px]"
                   title={
                     pipSupported()
-                      ? "Always-on-top overlay that stays out of tab/window screen shares — perfect beside a Zoom or Meet call"
-                      : "Open the overlay in its own small window — perfect beside a Zoom call"
+                      ? "Always-on-top overlay that stays out of tab/window screen shares — perfect beside a call. A whole-screen share will include it."
+                      : "Open the overlay in its own small window — perfect beside a call"
                   }
                 >
                   <ExternalLink size={15} />
@@ -1130,6 +1132,8 @@ export function Dashboard(): JSX.Element {
           </section>
         </Tabs.Content>
       </Tabs.Root>
+
+      <LegalLinks className="mt-8 justify-center" />
 
       {/* ── Script editor dialog ── */}
       <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>

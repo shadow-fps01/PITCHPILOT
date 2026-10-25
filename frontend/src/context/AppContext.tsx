@@ -53,11 +53,21 @@ function loadSettings(): AppSettings {
   return DEFAULT_SETTINGS;
 }
 
-/** Initial view: support `?view=live` for detached overlay windows. */
+const VIEWS: ViewMode[] = [
+  "dashboard",
+  "live",
+  "settings",
+  "privacy",
+  "terms",
+  "refunds",
+  "support",
+];
+
+/** Initial view: support `?view=live` and the public legal pages. */
 function initialViewFromQuery(): ViewMode {
   try {
     const param = new URLSearchParams(window.location.search).get("view");
-    return param === "live" ? "live" : "dashboard";
+    return VIEWS.includes(param as ViewMode) ? (param as ViewMode) : "dashboard";
   } catch {
     return "dashboard";
   }
@@ -71,7 +81,9 @@ export function AppProvider({
   /** Overrides `?view=` detection — used by the PiP overlay root. */
   initialView?: ViewMode;
 }): JSX.Element {
-  const [view, setView] = useState<ViewMode>(initialView ?? initialViewFromQuery);
+  const [view, setViewState] = useState<ViewMode>(
+    initialView ?? initialViewFromQuery,
+  );
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [activeScript, setActiveScript] = useState<Script | null>(null);
   const [settings, setSettings] = useState<AppSettings>(loadSettings);
@@ -87,6 +99,22 @@ export function AppProvider({
 
   const updateSettings = useCallback((patch: Partial<AppSettings>): void => {
     setSettings((current) => ({ ...current, ...patch }));
+  }, []);
+
+  const setView = useCallback((next: ViewMode): void => {
+    setViewState(next);
+    try {
+      const url = new URL(window.location.href);
+      if (next === "dashboard") {
+        url.searchParams.delete("view");
+      } else {
+        url.searchParams.set("view", next);
+      }
+      window.history.replaceState({}, "", url);
+    } catch {
+      /* history unavailable — keep the in-memory view */
+    }
+    window.scrollTo({ top: 0, behavior: "auto" });
   }, []);
 
   const refreshSessions = useCallback((): void => {
@@ -114,6 +142,7 @@ export function AppProvider({
       updateSettings,
       sessionsVersion,
       refreshSessions,
+      setView,
     ],
   );
 

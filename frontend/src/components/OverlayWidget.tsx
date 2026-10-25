@@ -8,7 +8,7 @@
  * - Ask anything at the bottom — the copilot answers using the live call
  *   transcript and your script outline.
  * - Copilot integrations kept from the previous versions:
- *   F1 native dual-audio capture, F3 "Next up" cards, F4 teleprompter.
+ *   F3 "Next up" cards, F4 teleprompter, and browser screen/call-audio capture.
  *
  * Visual system: a translucent glass card whose ambient glow reacts to the
  * live microphone level, with animated status and level meters.
@@ -51,7 +51,6 @@ import { WpmGauge } from "@/components/WpmGauge";
 import { Waveform } from "@/components/ui/Waveform";
 import { cn, formatDuration } from "@/lib/utils";
 import type {
-  CaptureStatusMessage,
   DialogueEntry,
   MetricsMessage,
   ServerMessage,
@@ -111,7 +110,6 @@ export function OverlayWidget(): JSX.Element {
 
   // ── Copilot state ──
   const [status, setStatus] = useState<SessionStatusMessage | null>(null);
-  const [capture, setCapture] = useState<CaptureStatusMessage | null>(null);
   const [prompterOn, setPrompterOn] = useState(false);
   const [dialogue, setDialogue] = useState<DialogueEntry[]>([]);
   const [draft, setDraft] = useState("");
@@ -188,10 +186,9 @@ export function OverlayWidget(): JSX.Element {
     }
   }, [sessionId]);
 
-  const captureActive = capture?.active === true;
-  const effectiveMicLevel = captureActive
-    ? (metrics?.mic_level ?? 0)
-    : recorder.micLevel;
+  // The mic meter always comes from the presenter's microphone. Shared call
+  // audio is transcribed separately and must never drive the speaking coach.
+  const effectiveMicLevel = recorder.micLevel;
 
   // ── WebSocket wiring ────────────────────────────────────────────────
   const handleMessage = useCallback(
@@ -217,16 +214,6 @@ export function OverlayWidget(): JSX.Element {
         }
         case "status": {
           setStatus(message);
-          break;
-        }
-        case "capture_status": {
-          setCapture(message);
-          if (message.error !== null) {
-            setSessionError(message.error);
-          } else {
-            setSessionError(null);
-          }
-          if (message.active) setLiveStarted(true);
           break;
         }
         case "context_card": {
@@ -402,7 +389,7 @@ export function OverlayWidget(): JSX.Element {
       setSessionError(null);
       try {
         const result = await recorder.start(
-          (chunk) => sendAudio(chunk),
+          (chunk, source) => sendAudio(chunk, source),
           withScreen
             ? {
                 withScreen: true,
@@ -413,10 +400,16 @@ export function OverlayWidget(): JSX.Element {
         );
         if (withScreen) {
           sendControl({ type: "screen", action: "start" });
+          if (result.screenSurface === "monitor") {
+            pushEntry({
+              role: "system",
+              text: "You are sharing your whole screen — this overlay is visible in that share. Stop and choose the call tab or window instead.",
+            });
+          }
           if (!result.screenAudioActive) {
             pushEntry({
               role: "system",
-              text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”.",
+              text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”. Use headphones so the coach measures only your voice.",
             });
           }
         }
@@ -450,10 +443,16 @@ export function OverlayWidget(): JSX.Element {
         onEnded: handleScreenEnded,
       });
       sendControl({ type: "screen", action: "start" });
+      if (result.screenSurface === "monitor") {
+        pushEntry({
+          role: "system",
+          text: "You are sharing your whole screen — this overlay is visible in that share. Stop and choose the call tab or window instead.",
+        });
+      }
       if (!result.screenAudioActive) {
         pushEntry({
           role: "system",
-          text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”.",
+          text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”. Use headphones so the coach measures only your voice.",
         });
       }
     } catch {
@@ -465,15 +464,6 @@ export function OverlayWidget(): JSX.Element {
     recorder.stopScreenShare();
     sendControl({ type: "screen", action: "stop" });
   }, [recorder, sendControl]);
-
-  const startNativeCapture = useCallback((): void => {
-    setSessionError(null);
-    sendControl({ type: "capture", action: "start" });
-  }, [sendControl]);
-
-  const stopNativeCapture = useCallback((): void => {
-    sendControl({ type: "capture", action: "stop" });
-  }, [sendControl]);
 
   const askCopilot = useCallback(
     (question: string): void => {
@@ -556,9 +546,7 @@ export function OverlayWidget(): JSX.Element {
       if (ended !== null) return;
       if (event.key === " ") {
         event.preventDefault();
-        if (captureActive) {
-          stopNativeCapture();
-        } else if (recorder.isRecording) {
+        if (recorder.isRecording) {
           endSession();
         } else {
           void startMic();
@@ -575,11 +563,9 @@ export function OverlayWidget(): JSX.Element {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
     ended,
-    captureActive,
     recorder.isRecording,
     startMic,
     endSession,
-    stopNativeCapture,
     dialogue,
     copyEntry,
   ]);
@@ -681,15 +667,15 @@ export function OverlayWidget(): JSX.Element {
             <span className="chip">
               <Radio size={9} /> Listening
             </span>
-            {captureActive && (
-              <span className="chip-emerald">
-                <Mic size={9} /> capture: {capture?.mode}
-              </span>
-            )}
             {recorder.screenActive && (
               <span className="chip-emerald">
                 <Eye size={9} />{" "}
                 {recorder.screenAudioActive ? "screen + call audio" : "screen"}
+              </span>
+            )}
+            {recorder.screenActive && recorder.screenSurface === "monitor" && (
+              <span className="chip-gold">
+                <EyeOff size={9} /> whole screen visible
               </span>
             )}
             {status.copilot_active && (
@@ -764,7 +750,7 @@ export function OverlayWidget(): JSX.Element {
                 Your copilot is listening
               </p>
               <p className="max-w-[260px] text-[11px] leading-relaxed text-slate-500">
-                Start the mic or native capture — suggestions appear here
+                Start the mic — suggestions appear here
                 automatically as the call unfolds. Or ask anything below.
               </p>
             </div>
@@ -991,16 +977,7 @@ export function OverlayWidget(): JSX.Element {
                 </button>
               )}
 
-              {captureActive ? (
-                <div className="flex gap-2">
-                  <span className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-sm font-semibold text-emerald-300">
-                    <Mic size={15} /> Native capture: {capture?.mode}
-                  </span>
-                  <button onClick={endSession} className="btn-danger">
-                    <MicOff size={15} /> End
-                  </button>
-                </div>
-              ) : !recorder.isRecording ? (
+              {!recorder.isRecording ? (
                 <div className="flex flex-col gap-2">
                   <button
                     onClick={() => void startMic()}
@@ -1065,24 +1042,6 @@ export function OverlayWidget(): JSX.Element {
                 </div>
               )}
 
-              {/* native capture toggle (F1) */}
-              {status?.capture_available === true && !recorder.isRecording && (
-                <button
-                  onClick={captureActive ? stopNativeCapture : startNativeCapture}
-                  className={cn(
-                    "flex items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-colors",
-                    captureActive
-                      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                      : "border-white/10 text-slate-400 hover:border-emerald-500/40 hover:text-emerald-300",
-                  )}
-                >
-                  <Radio size={12} />
-                  {captureActive
-                    ? "Stop native capture"
-                    : "Native capture (mic + system audio)"}
-                </button>
-              )}
-
               <div className="flex items-center justify-between">
                 {(wsStatus === "closed" || wsStatus === "idle") &&
                   sessionId !== null && (
@@ -1098,7 +1057,7 @@ export function OverlayWidget(): JSX.Element {
                 <p className="text-[9px] leading-tight text-slate-600">
                   {pipMode
                     ? "Share the call tab or window (not your whole screen) — this overlay stays out of it."
-                    : "This dialogue is only visible to you — never in your screen share."}
+                    : "Share the call tab or window. A whole-screen share includes this overlay."}
                 </p>
               </div>
               <p className="mt-1 text-center text-[9px] text-slate-600">

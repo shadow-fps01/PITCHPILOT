@@ -20,6 +20,7 @@ import {
 
 import { useAuth } from "@/context/AuthContext";
 import { ApiError, authApi } from "@/lib/api";
+import { LegalLinks } from "@/components/LegalLinks";
 import { Logo } from "@/components/ui/Logo";
 import { Waveform } from "@/components/ui/Waveform";
 import { cn } from "@/lib/utils";
@@ -29,8 +30,8 @@ type AuthMode = "login" | "register" | "forgot" | "reset";
 const HIGHLIGHTS = [
   {
     icon: Sparkles,
-    title: "Cues only you can see",
-    body: "Pacing, filler and script-miss nudges float over your call — never on the shared screen.",
+    title: "Private cues beside your call",
+    body: "Pacing, filler and script-miss nudges float in a private overlay beside your call.",
   },
   {
     icon: Wand2,
@@ -434,8 +435,9 @@ export function AuthForm(): JSX.Element {
           <p className="mt-4 text-center text-xs text-slate-600">
             {isAux
               ? "Reset links are single-use and expire quickly."
-              : "Cues stay private to you — your screen share stays clean."}
+              : "Share only the call tab or window — a whole-screen share includes the overlay."}
           </p>
+          <LegalLinks className="mt-3 justify-center" />
         </section>
       </div>
     </main>

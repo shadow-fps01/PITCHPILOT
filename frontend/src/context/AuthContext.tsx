@@ -22,6 +22,8 @@ interface AuthContextValue {
   initializing: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
+  /** Change the password and replace the current session token. */
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   logout: () => void;
   /** Re-fetch the current user (plan state can change after checkout). */
   refreshUser: () => Promise<void>;
@@ -135,6 +137,16 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     setUser(response.user);
   }, []);
 
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string): Promise<void> => {
+      const response = await authApi.changePassword(currentPassword, newPassword);
+      setStoredToken(response.access_token);
+      setToken(response.access_token);
+      setUser(response.user);
+    },
+    [],
+  );
+
   const logout = useCallback((): void => {
     setStoredToken(null);
     setToken(null);
@@ -163,6 +175,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       initializing,
       login,
       register,
+      changePassword,
       logout,
       refreshUser,
       acceptConsent,
@@ -175,6 +188,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       initializing,
       login,
       register,
+      changePassword,
       logout,
       refreshUser,
       acceptConsent,

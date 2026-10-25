@@ -138,7 +138,9 @@ class LiveSessionRegistry:
 
     def cancel_finalize(self, session_id: uuid.UUID) -> None:
         task = self._finalize_tasks.pop(session_id, None)
-        if task is not None:
+        # `finalize()` is itself called from this task when the grace timer
+        # expires; cancelling the current task would interrupt persistence.
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
 
     async def _finalize_after(self, session_id: uuid.UUID, delay: float) -> None:
@@ -204,6 +206,22 @@ class LiveSessionRegistry:
         ]
         for session_id in session_ids:
             await self.finalize(session_id)
+
+    async def finalize_all(self) -> int:
+        """Finalize every live session (graceful process shutdown).
+
+        Render can restart a free instance at any time. Persisting `ended_at`
+        on the way down prevents those sessions from looking live forever.
+        """
+        for task in list(self._finalize_tasks.values()):
+            task.cancel()
+        self._finalize_tasks.clear()
+        session_ids = list(self._states)
+        for session_id in session_ids:
+            await self.finalize(session_id)
+        if session_ids:
+            logger.info(f"Finalized {len(session_ids)} live session(s) on shutdown")
+        return len(session_ids)
 
     def active_count(self) -> int:
         return len(self._states)

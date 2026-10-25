@@ -145,6 +145,19 @@ export const authApi = {
       body: JSON.stringify({ token, password }),
     }),
 
+  /** Change the password from a signed-in session; returns a fresh token. */
+  changePassword: (
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<AuthResponse> =>
+    request<AuthResponse>("/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
+
   /** Record permission to capture/transcribe the call. */
   consent: (): Promise<User> =>
     request<User>("/auth/consent", { method: "POST" }),

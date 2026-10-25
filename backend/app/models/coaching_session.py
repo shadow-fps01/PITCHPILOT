@@ -36,7 +36,7 @@ class CoachingSession(Base):
         DateTime(timezone=True), nullable=True
     )
     ended_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True, index=True
     )
     duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

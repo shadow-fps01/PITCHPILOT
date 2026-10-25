@@ -195,6 +195,29 @@ class AICoach:
             self.anticipation.evaluate(context)
         )
 
+    def feed_external_transcript(self, text: str) -> None:
+        """Use the other party's words for next-topic anticipation only.
+
+        This deliberately does not touch the speaking analytics. It is called
+        for shared call/system audio so the anticipator can react to a question
+        from the other side without counting their words as the presenter's.
+        """
+        text = text.strip()
+        if not text or self.anticipation is None:
+            return
+        if (
+            self._anticipation_task is not None
+            and not self._anticipation_task.done()
+        ):
+            return
+        context = (
+            f"{self.analytics.context_text(self._settings.script_audit_context_words)} "
+            f"{text}"
+        ).strip()
+        self._anticipation_task = asyncio.create_task(
+            self.anticipation.evaluate(context)
+        )
+
     # ── Engines ──────────────────────────────────────────────────────
     def _metrics_snapshot(self, t: float) -> MetricsMessage:
         assert self._started_monotonic is not None

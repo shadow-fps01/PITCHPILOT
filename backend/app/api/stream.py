@@ -3,7 +3,9 @@
 Protocol
 --------
 Client → Server
-  * binary frames: 16 kHz 16-bit mono PCM audio (sent every ~160 ms)
+  * binary frames: `b"PPA1"` + one source byte (`1` = presenter/mic,
+    `2` = other party/shared call audio) + 16 kHz 16-bit mono PCM
+    (sent every ~160 ms). Untagged legacy PCM is treated as presenter audio.
   * `{"type": "ping", "timestamp": ...}` heartbeat
   * `{"type": "stop"}` to end the session gracefully
 
@@ -81,6 +83,27 @@ _WS_BAD_REQUEST = 4400
 _WS_ALREADY_ENDED = 4410
 
 MAX_QUEUE_SIZE = 500
+
+_AUDIO_MAGIC = b"PPA1"
+_AUDIO_PRESENTER = 1
+_AUDIO_OTHER = 2
+
+
+def split_audio_frame(data: bytes) -> tuple[str, bytes]:
+    """Split a tagged PCM frame into `(speaker, pcm16)`.
+
+    The browser tags each frame so microphone and shared call audio can be
+    transcribed independently (the coach must never count the other party's
+    words as the presenter's). Old/untagged clients are treated as presenter
+    audio for backwards compatibility.
+    """
+    if len(data) >= len(_AUDIO_MAGIC) + 1 and data.startswith(_AUDIO_MAGIC):
+        source = data[len(_AUDIO_MAGIC)]
+        pcm = data[len(_AUDIO_MAGIC) + 1 :]
+        if source == _AUDIO_OTHER:
+            return "other", pcm
+        return "presenter", pcm
+    return "presenter", data
 
 
 async def _persist_event(session_id: uuid.UUID, cue: CueMessage, elapsed: float) -> None:
@@ -485,6 +508,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         emit(CaptureStatusMessage(active=False, mode="off"))
 
     async def on_transcript(chunk: TranscriptChunk) -> None:
+        """Presenter/microphone transcript: coach metrics + copilot context."""
         t = time.monotonic()
         try:
             for message in await state.coach.feed_transcript(chunk.text, chunk.is_final, t):
@@ -495,9 +519,61 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
             logger.warning(f"Coach feed failure on session {sid}: {exc}")
         if chunk.is_final and state.copilot is not None:
             try:
-                state.copilot.feed_final(chunk.text)
+                state.copilot.feed_final(chunk.text, speaker="presenter")
             except Exception as exc:  # noqa: BLE001 — copilot must never break audio
                 logger.warning(f"Copilot feed failure on session {sid}: {exc}")
+
+    async def on_system_transcript(chunk: TranscriptChunk) -> None:
+        """Other-party transcript: copilot context and RAG triggers only.
+
+        Deliberately does NOT call `state.coach.feed_transcript`: WPM, filler
+        counts and script coverage must describe the presenter's delivery, not
+        the person on the other end of the call.
+        """
+        if not chunk.is_final:
+            return
+        if state.copilot is not None:
+            try:
+                state.copilot.feed_final(chunk.text, speaker="other")
+            except Exception as exc:  # noqa: BLE001 — copilot must never break audio
+                logger.warning(f"Copilot system feed failure on session {sid}: {exc}")
+        try:
+            state.coach.feed_external_transcript(chunk.text)
+        except Exception as exc:  # noqa: BLE001 — anticipation is best-effort
+            logger.warning(f"Anticipation system feed failed on session {sid}: {exc}")
+
+    system_provider = None
+    system_provider_disabled = False
+
+    async def ensure_system_provider():
+        """Lazily open a second STT stream for shared call audio.
+
+        Starting it on the first system-audio frame avoids a second provider
+        connection (and its cost) for mic-only sessions.
+        """
+        nonlocal system_provider, system_provider_disabled
+        if system_provider is not None:
+            return system_provider
+        if system_provider_disabled:
+            return None
+        if provider_name == "mock":
+            # Never create a second simulated speaker in demo mode.
+            system_provider_disabled = True
+            return None
+        try:
+            candidate, name = build_stt_provider(on_system_transcript)
+            await candidate.start()
+        except Exception as exc:  # noqa: BLE001
+            system_provider_disabled = True
+            logger.warning(
+                f"Other-party transcription unavailable on session {sid}: {exc}"
+            )
+            return None
+        system_provider = candidate
+        logger.info(
+            f"Other-party transcription active on session {sid} via {name}"
+        )
+        return candidate
 
     provider, provider_name = build_stt_provider(on_transcript)
     emit(SessionStartedMessage(session_id=sid, started_at=state.started_at))
@@ -555,7 +631,20 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 break
             data = message.get("bytes")
             if data is not None:
-                await provider.send_audio(data)
+                speaker, pcm = split_audio_frame(data)
+                if not pcm:
+                    continue
+                if speaker == "other":
+                    other = await ensure_system_provider()
+                    if other is not None:
+                        try:
+                            await other.send_audio(pcm)
+                        except Exception as exc:  # noqa: BLE001 — keep the mic stream alive
+                            logger.warning(
+                                f"Other-party STT send failed on session {sid}: {exc}"
+                            )
+                else:
+                    await provider.send_audio(pcm)
                 continue
             text = message.get("text")
             if text is None:
@@ -595,6 +684,12 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
     if capture_service is not None:
         capture_service.stop()
         capture_service = None
+    if system_provider is not None:
+        try:
+            await system_provider.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must continue
+            logger.warning(f"Other-party STT stop failed on {sid}: {exc}")
+        system_provider = None
     await provider.stop()
     ticker_task.cancel()
 

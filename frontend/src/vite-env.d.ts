@@ -2,9 +2,11 @@
 
 interface ImportMetaEnv {
   readonly VITE_API_BASE_URL?: string;
-  /** Optional public legal pages shown in the recording-consent dialog. */
+  /** Optional external legal pages; defaults to the built-in public pages. */
   readonly VITE_PRIVACY_URL?: string;
   readonly VITE_TERMS_URL?: string;
+  /** Support inbox shown on the built-in support page. */
+  readonly VITE_SUPPORT_EMAIL?: string;
 }
 
 interface ImportMeta {

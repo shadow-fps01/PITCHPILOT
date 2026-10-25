@@ -22,6 +22,7 @@ from app.models.script import Script
 from app.models.user import PLAN_PLUS, User
 from app.schemas.auth import (
     AccountDeleteRequest,
+    ChangePasswordRequest,
     EmailAvailability,
     ForgotPasswordRequest,
     LoginRequest,
@@ -217,6 +218,42 @@ async def reset_password(
     ws_tickets.revoke_user(str(user.id))
     logger.info(f"Password reset for {user.email}")
     return MessageResponse(message="Password updated. Sign in with your new password.")
+
+
+@router.post(
+    "/change-password",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limit("auth"))],
+)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    """Change the password from an authenticated session.
+
+    The password change bumps `token_version`, which invalidates every older
+    access token and all outstanding WebSocket tickets. A fresh token is
+    returned so this browser stays signed in; other devices must sign in again.
+    """
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Current password is incorrect",
+        )
+    if verify_password(payload.new_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choose a password you haven't used for this account",
+        )
+
+    current_user.hashed_password = hash_password(payload.new_password)
+    current_user.token_version += 1
+    await db.commit()
+    await db.refresh(current_user)
+    ws_tickets.revoke_user(str(current_user.id))
+    logger.info(f"Password changed for {current_user.email}")
+    return _token_response(current_user)
 
 
 @router.get("/me", response_model=UserPublic)

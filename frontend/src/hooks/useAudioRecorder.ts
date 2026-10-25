@@ -3,13 +3,21 @@
  * 16 kHz 16-bit PCM frames (~every 160 ms) as ArrayBuffers, plus a
  * throttled RMS mic level for the live overlay meter.
  *
- * It can optionally mix the audio of a browser-shared tab/window (system or
- * call audio) into the same PCM stream. The same display stream also feeds a
- * low-frequency JPEG frame pump for the live screen-vision copilot; frames
- * are sent over the WebSocket and never stored locally.
+ * It can also capture the audio of a browser-shared tab/window (the other
+ * party on a call). Microphone and shared audio use separate worklets and are
+ * tagged by source, so the server can transcribe them independently and keep
+ * speaking metrics limited to the presenter.
+ *
+ * The same display stream feeds a low-frequency JPEG frame pump for the live
+ * screen-vision copilot; frames are sent over the WebSocket and never stored
+ * locally. `displaySurface` is exposed so the UI can warn when the user picked
+ * the whole screen instead of a tab/window.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AudioSource } from "@/types";
+
+export type DisplaySurface = "monitor" | "window" | "browser" | null;
 
 export interface ScreenCaptureCallbacks {
   /** Called with a downscaled JPEG (base64, no data-URL prefix). */
@@ -26,11 +34,12 @@ export interface CaptureStartOptions extends ScreenCaptureCallbacks {
 export interface CaptureStartResult {
   screenActive: boolean;
   screenAudioActive: boolean;
+  screenSurface: DisplaySurface;
 }
 
 export interface UseAudioRecorder {
   start: (
-    onAudioChunk: (chunk: ArrayBuffer) => void,
+    onAudioChunk: (chunk: ArrayBuffer, source: AudioSource) => void,
     options?: CaptureStartOptions,
   ) => Promise<CaptureStartResult>;
   /** Add a screen share to an already-running mic capture. */
@@ -43,6 +52,7 @@ export interface UseAudioRecorder {
   isRecording: boolean;
   screenActive: boolean;
   screenAudioActive: boolean;
+  screenSurface: DisplaySurface;
   screenSupported: boolean;
   micLevel: number; // 0..1, for a VU meter
   error: string | null;
@@ -80,10 +90,19 @@ function isPermissionDenial(error: unknown): boolean {
   );
 }
 
+function readDisplaySurface(display: MediaStream): DisplaySurface {
+  const track = display.getVideoTracks()[0];
+  const value = track?.getSettings().displaySurface;
+  return value === "monitor" || value === "window" || value === "browser"
+    ? value
+    : null;
+}
+
 export function useAudioRecorder(): UseAudioRecorder {
   const [isRecording, setIsRecording] = useState(false);
   const [screenActive, setScreenActive] = useState(false);
   const [screenAudioActive, setScreenAudioActive] = useState(false);
+  const [screenSurface, setScreenSurface] = useState<DisplaySurface>(null);
   const [micLevel, setMicLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,17 +112,21 @@ export function useAudioRecorder(): UseAudioRecorder {
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const displaySourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const displayGainRef = useRef<GainNode | null>(null);
-  const mixerRef = useRef<GainNode | null>(null);
-  const workletRef = useRef<AudioWorkletNode | null>(null);
+  const micWorkletRef = useRef<AudioWorkletNode | null>(null);
+  const displayWorkletRef = useRef<AudioWorkletNode | null>(null);
+  const sinkRef = useRef<GainNode | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameTimerRef = useRef<number | null>(null);
   const firstFrameTimerRef = useRef<number | null>(null);
-  const onChunkRef = useRef<((chunk: ArrayBuffer) => void) | null>(null);
+  const onChunkRef = useRef<
+    ((chunk: ArrayBuffer, source: AudioSource) => void) | null
+  >(null);
   const onScreenFrameRef = useRef<((image: string) => void) | null>(null);
   const onScreenEndedRef = useRef<(() => void) | null>(null);
   const isRecordingRef = useRef(false);
   const screenActiveRef = useRef(false);
+  const screenSurfaceRef = useRef<DisplaySurface>(null);
   const levelTickRef = useRef(0);
 
   const screenSupported =
@@ -111,20 +134,23 @@ export function useAudioRecorder(): UseAudioRecorder {
     navigator.mediaDevices !== undefined &&
     typeof navigator.mediaDevices.getDisplayMedia === "function";
 
-  const handlePortMessage = useCallback((event: MessageEvent<unknown>) => {
-    if (!isWorkletMessage(event.data)) return;
-    if (event.data.type === "audio") {
-      // Copy: WebSocket.send() detaches the buffer it is given.
-      const buffer = event.data.samples.buffer.slice(0);
-      onChunkRef.current?.(buffer);
-    } else {
-      levelTickRef.current += 1;
-      if (levelTickRef.current % 2 === 0) {
-        // Speech RMS typically sits far below 1; boost for visualisation.
-        setMicLevel(Math.min(1, event.data.rms * 3.5));
+  const handlePortMessage = useCallback(
+    (source: AudioSource, event: MessageEvent<unknown>) => {
+      if (!isWorkletMessage(event.data)) return;
+      if (event.data.type === "audio") {
+        // Copy: WebSocket.send() detaches the buffer it is given.
+        const buffer = event.data.samples.buffer.slice(0);
+        onChunkRef.current?.(buffer, source);
+      } else if (source === "presenter") {
+        levelTickRef.current += 1;
+        if (levelTickRef.current % 2 === 0) {
+          // Speech RMS typically sits far below 1; boost for visualisation.
+          setMicLevel(Math.min(1, event.data.rms * 3.5));
+        }
       }
-    }
-  }, []);
+    },
+    [],
+  );
 
   const stopFramePump = useCallback(() => {
     if (frameTimerRef.current !== null) {
@@ -144,6 +170,18 @@ export function useAudioRecorder(): UseAudioRecorder {
     canvasRef.current = null;
   }, []);
 
+  const disconnectDisplayAudio = useCallback(() => {
+    if (displayWorkletRef.current !== null) {
+      displayWorkletRef.current.port.onmessage = null;
+      displayWorkletRef.current.disconnect();
+      displayWorkletRef.current = null;
+    }
+    displaySourceRef.current?.disconnect();
+    displaySourceRef.current = null;
+    displayGainRef.current?.disconnect();
+    displayGainRef.current = null;
+  }, []);
+
   const stopDisplay = useCallback(
     (notify: boolean) => {
       stopFramePump();
@@ -155,22 +193,21 @@ export function useAudioRecorder(): UseAudioRecorder {
           track.stop();
         });
       }
-      displaySourceRef.current?.disconnect();
-      displayGainRef.current?.disconnect();
-      displaySourceRef.current = null;
-      displayGainRef.current = null;
+      disconnectDisplayAudio();
 
       const wasActive = screenActiveRef.current;
       screenActiveRef.current = false;
+      screenSurfaceRef.current = null;
       setScreenActive(false);
       setScreenAudioActive(false);
+      setScreenSurface(null);
 
       const ended = onScreenEndedRef.current;
       onScreenFrameRef.current = null;
       onScreenEndedRef.current = null;
       if (notify && wasActive) ended?.();
     },
-    [stopFramePump],
+    [disconnectDisplayAudio, stopFramePump],
   );
 
   const teardown = useCallback(() => {
@@ -187,21 +224,17 @@ export function useAudioRecorder(): UseAudioRecorder {
         track.stop();
       });
     }
+    disconnectDisplayAudio();
 
-    displaySourceRef.current?.disconnect();
-    displayGainRef.current?.disconnect();
-    displaySourceRef.current = null;
-    displayGainRef.current = null;
-
-    if (workletRef.current !== null) {
-      workletRef.current.port.onmessage = null;
-      workletRef.current.disconnect();
-      workletRef.current = null;
+    if (micWorkletRef.current !== null) {
+      micWorkletRef.current.port.onmessage = null;
+      micWorkletRef.current.disconnect();
+      micWorkletRef.current = null;
     }
     micSourceRef.current?.disconnect();
     micSourceRef.current = null;
-    mixerRef.current?.disconnect();
-    mixerRef.current = null;
+    sinkRef.current?.disconnect();
+    sinkRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     void ctxRef.current?.close();
@@ -209,11 +242,13 @@ export function useAudioRecorder(): UseAudioRecorder {
 
     isRecordingRef.current = false;
     screenActiveRef.current = false;
+    screenSurfaceRef.current = null;
     setIsRecording(false);
     setScreenActive(false);
     setScreenAudioActive(false);
+    setScreenSurface(null);
     setMicLevel(0);
-  }, [stopFramePump]);
+  }, [disconnectDisplayAudio, stopFramePump]);
 
   const requestDisplay = useCallback(async (): Promise<MediaStream> => {
     if (!screenSupported) {
@@ -243,10 +278,10 @@ export function useAudioRecorder(): UseAudioRecorder {
     async (
       display: MediaStream,
       options: ScreenCaptureCallbacks,
-    ): Promise<void> => {
+    ): Promise<DisplaySurface> => {
       const ctx = ctxRef.current;
-      const mixer = mixerRef.current;
-      if (ctx === null || mixer === null) {
+      const sink = sinkRef.current;
+      if (ctx === null || sink === null) {
         throw new Error("Audio capture is not ready.");
       }
 
@@ -254,15 +289,32 @@ export function useAudioRecorder(): UseAudioRecorder {
       onScreenFrameRef.current = options.onFrame ?? null;
       onScreenEndedRef.current = options.onEnded ?? null;
 
+      const surface = readDisplaySurface(display);
+      screenSurfaceRef.current = surface;
+      setScreenSurface(surface);
+
       const audioTracks = display.getAudioTracks();
       if (audioTracks.length > 0) {
         const source = ctx.createMediaStreamSource(display);
         const gain = ctx.createGain();
         gain.gain.value = 0.9;
+
+        // A separate worklet keeps the other party's audio in its own source
+        // stream. It is never mixed into the presenter's PCM frames.
+        const worklet = new AudioWorkletNode(ctx, "pcm-recorder", {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+        });
+        worklet.port.onmessage = (event) =>
+          handlePortMessage("other", event);
         source.connect(gain);
-        gain.connect(mixer);
+        gain.connect(worklet);
+        worklet.connect(sink);
+
         displaySourceRef.current = source;
         displayGainRef.current = gain;
+        displayWorkletRef.current = worklet;
         audioTracks.forEach((track) => {
           track.onended = () => setScreenAudioActive(false);
         });
@@ -330,13 +382,15 @@ export function useAudioRecorder(): UseAudioRecorder {
         pumpFrame,
         SCREEN_FRAME_INTERVAL_MS,
       );
+
+      return surface;
     },
-    [stopDisplay],
+    [handlePortMessage, stopDisplay],
   );
 
   const start = useCallback(
     async (
-      onAudioChunk: (chunk: ArrayBuffer) => void,
+      onAudioChunk: (chunk: ArrayBuffer, source: AudioSource) => void,
       options: CaptureStartOptions = {},
     ): Promise<CaptureStartResult> => {
       if (isRecordingRef.current) {
@@ -344,6 +398,7 @@ export function useAudioRecorder(): UseAudioRecorder {
           screenActive: screenActiveRef.current,
           screenAudioActive:
             (displayStreamRef.current?.getAudioTracks().length ?? 0) > 0,
+          screenSurface: screenSurfaceRef.current,
         };
       }
 
@@ -373,30 +428,24 @@ export function useAudioRecorder(): UseAudioRecorder {
         ctxRef.current = ctx;
         await ctx.audioWorklet.addModule(WORKLET_URL);
 
+        // Silent output keeps the audio graph pulling without echoing the mic.
+        const sink = ctx.createGain();
+        sink.gain.value = 0;
+        sink.connect(ctx.destination);
+        sinkRef.current = sink;
+
         const source = ctx.createMediaStreamSource(mic);
         micSourceRef.current = source;
-
-        // A mixer is always present so a screen share can be added later
-        // without rebuilding the audio graph.
-        const mixer = ctx.createGain();
-        mixer.gain.value = 0.9;
-        mixerRef.current = mixer;
-        source.connect(mixer);
-
-        const worklet = new AudioWorkletNode(ctx, "pcm-recorder", {
+        const micWorklet = new AudioWorkletNode(ctx, "pcm-recorder", {
           numberOfInputs: 1,
           numberOfOutputs: 1,
           outputChannelCount: [1],
         });
-        worklet.port.onmessage = handlePortMessage;
-        workletRef.current = worklet;
-
-        mixer.connect(worklet);
-        // Route silent output to the destination so the graph keeps pulling.
-        const sink = ctx.createGain();
-        sink.gain.value = 0;
-        worklet.connect(sink);
-        sink.connect(ctx.destination);
+        micWorklet.port.onmessage = (event) =>
+          handlePortMessage("presenter", event);
+        source.connect(micWorklet);
+        micWorklet.connect(sink);
+        micWorkletRef.current = micWorklet;
 
         if (ctx.state === "suspended") {
           await ctx.resume();
@@ -405,13 +454,15 @@ export function useAudioRecorder(): UseAudioRecorder {
         isRecordingRef.current = true;
         setIsRecording(true);
 
+        let surface: DisplaySurface = null;
         if (display !== null) {
-          await attachDisplay(display, options);
+          surface = await attachDisplay(display, options);
         }
 
         return {
           screenActive: display !== null,
           screenAudioActive: (display?.getAudioTracks().length ?? 0) > 0,
+          screenSurface: surface,
         };
       } catch (err) {
         if (display !== null) {
@@ -447,6 +498,7 @@ export function useAudioRecorder(): UseAudioRecorder {
           screenActive: true,
           screenAudioActive:
             (displayStreamRef.current?.getAudioTracks().length ?? 0) > 0,
+          screenSurface: screenSurfaceRef.current,
         };
       }
 
@@ -454,10 +506,11 @@ export function useAudioRecorder(): UseAudioRecorder {
       let display: MediaStream | null = null;
       try {
         display = await requestDisplay();
-        await attachDisplay(display, options);
+        const surface = await attachDisplay(display, options);
         return {
           screenActive: true,
           screenAudioActive: display.getAudioTracks().length > 0,
+          screenSurface: surface,
         };
       } catch (err) {
         if (display !== null) {
@@ -502,6 +555,7 @@ export function useAudioRecorder(): UseAudioRecorder {
     isRecording,
     screenActive,
     screenAudioActive,
+    screenSurface,
     screenSupported,
     micLevel,
     error,
