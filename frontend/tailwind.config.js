@@ -110,8 +110,12 @@ export default {
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
         "scale-in": {
-          "0%": { opacity: "0", transform: "scale(0.96)" },
-          "100%": { opacity: "1", transform: "scale(1)" },
+          // Use the independent `scale` property, not `transform`. Several
+          // centered dialogs combine this animation with
+          // `-translate-x-1/2 -translate-y-1/2`; animating `transform` here
+          // would overwrite that centering once the animation fills.
+          "0%": { opacity: "0", scale: "0.96" },
+          "100%": { opacity: "1", scale: "1" },
         },
         "cue-in": {
           "0%": { opacity: "0", transform: "translateY(10px) scale(0.96)" },
