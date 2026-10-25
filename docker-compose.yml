@@ -1,0 +1,50 @@
+name: pitchpilot
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Production-shaped deployment: nginx-served SPA + single-worker FastAPI.
+#
+#   cp .env.production.example .env.production   # then fill it in
+#   docker compose up -d --build
+#
+# Open http://localhost (or put a TLS-terminating proxy in front of :80).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  api:
+    build:
+      context: ./backend
+    env_file:
+      - .env.production
+    environment:
+      # Hard overrides: never inherit dev conveniences. ENVIRONMENT defaults
+      # to production; set ENVIRONMENT=development in your shell only for a
+      # local container smoke test.
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      AUTO_CREATE_TABLES: "false"
+      # Keep the container port aligned with the healthcheck and nginx upstream,
+      # even if the developer's root .env sets PORT for a local process.
+      PORT: "8000"
+      AUDIO_CAPTURE_ENABLED: "false"
+      VISION_ENABLED: "false"
+    expose:
+      - "8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        # Same-origin API calls; nginx proxies /api and /api/ws to `api`.
+        VITE_API_BASE_URL: /api
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

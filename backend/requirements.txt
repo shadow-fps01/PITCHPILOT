@@ -1,0 +1,38 @@
+# ── PitchPilot Backend Dependencies ──
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic[email]>=2.7,<3.0
+pydantic-settings>=2.2,<3.0
+
+# Database (PostgreSQL, async)
+SQLAlchemy[asyncio]>=2.0.29,<3.0
+asyncpg>=0.29
+alembic>=1.13,<2.0
+
+# Observability
+loguru>=0.7,<1.0
+
+# Auth
+PyJWT>=2.8,<3.0
+bcrypt>=4.1,<5.0
+
+# Async HTTP + WebSocket clients (STT providers, LLM auditor)
+httpx>=0.27,<1.0
+websockets>=12.0
+
+# ── Copilot upgrade dependencies ──
+# Native dual audio capture (microphone + WASAPI system loopback, Windows)
+soundcard>=1.11
+numpy>=2.1
+# RAG knowledge base: pgvector column type for SQLAlchemy + Supabase
+pgvector>=0.3
+# Screen-capture worker for the multimodal vision pipeline
+mss>=9.0
+Pillow>=10.4
+
+# WebSocket server implementation for uvicorn. NOTE: uvicorn's default
+# `websockets` (sans-io) implementation stalls/drops live sockets on
+# Python 3.14 + websockets 17 on Windows; run uvicorn with `--ws wsproto`
+# (or `python run.py`, which sets it for you). `websockets` above is still
+# required for the Deepgram/OpenAI Realtime STT *client* connections.
+wsproto>=1.2,<2.0

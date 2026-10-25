@@ -1,0 +1,13 @@
+# Build context hygiene for the frontend image.
+node_modules/
+dist/
+.vite/
+npm-debug.log*
+*.log
+
+.env
+.env.*
+!.env.example
+
+vite.config.ts.timestamp-*
+*.tsbuildinfo

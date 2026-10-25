@@ -1,0 +1,215 @@
+/**
+ * UpgradeDialog — PitchPilot Plus paywall.
+ *
+ * Paystack mode redirects to the hosted checkout page; demo mode (no key
+ * configured) upgrades instantly so the whole flow is testable end-to-end.
+ */
+
+import { useCallback, useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import {
+  CheckCircle2,
+  CreditCard,
+  Crown,
+  Loader2,
+  Sparkles,
+  X,
+} from "lucide-react";
+
+import { ApiError, billingApi } from "@/lib/api";
+
+interface UpgradeDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Optional message to highlight (e.g. the 402 quota error). */
+  reason?: string | null;
+  priceDisplay: string;
+  freeSessions: number;
+  freeScripts: number;
+  paymentsLive: boolean;
+  /** Called after a demo-mode upgrade succeeds. */
+  onUpgraded: () => void;
+}
+
+const FEATURES = [
+  "Unlimited coaching sessions — pitch as often as you like",
+  "Unlimited scripts and outlines",
+  "Live pacing, filler-word and script-miss coaching",
+  "Next-topic suggestion cards, ready before you ask",
+];
+
+export function UpgradeDialog({
+  open,
+  onOpenChange,
+  reason,
+  priceDisplay,
+  freeSessions,
+  freeScripts,
+  paymentsLive,
+  onUpgraded,
+}: UpgradeDialogProps): JSX.Element {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [demoActivated, setDemoActivated] = useState(false);
+  const [alreadyPlus, setAlreadyPlus] = useState(false);
+
+  useEffect((): void => {
+    if (!open) {
+      setError(null);
+      setBusy(false);
+      setDemoActivated(false);
+      setAlreadyPlus(false);
+    }
+  }, [open]);
+
+  const upgrade = useCallback(async (): Promise<void> => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const response = await billingApi.checkout();
+      if (response.mode === "paystack" && response.authorization_url !== null) {
+        window.location.assign(response.authorization_url);
+        return; // the hosted page takes over
+      }
+      if (response.mode === "already_plus") {
+        // A previous Paystack payment was found and activated server-side —
+        // no new charge is needed.
+        setAlreadyPlus(true);
+        onUpgraded();
+        return;
+      }
+      // Demo mode: upgraded instantly.
+      setDemoActivated(true);
+      onUpgraded();
+    } catch (err) {
+      setError(
+        err instanceof ApiError ? err.message : "Could not start the upgrade",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, onUpgraded]);
+
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-40 bg-ink-950/80 backdrop-blur-sm" />
+        <Dialog.Content className="panel fixed left-1/2 top-1/2 z-50 max-h-[86vh] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 animate-scale-in overflow-hidden p-0">
+          {/* gradient header */}
+          <div className="relative overflow-hidden border-b border-white/[0.08] bg-gradient-to-br from-amber-400/15 via-transparent to-transparent px-6 pb-5 pt-5">
+            <span className="pointer-events-none absolute -right-8 -top-10 h-32 w-32 rounded-full bg-amber-400/25 blur-3xl" />
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-2.5">
+                <span className="rounded-xl bg-gradient-gold p-2 text-slate-950 shadow-glow-gold">
+                  <Crown size={18} />
+                </span>
+                <div>
+                  <Dialog.Title className="text-lg font-bold text-white">
+                    PitchPilot Plus
+                  </Dialog.Title>
+                  <p className="text-xs text-slate-400">
+                    Remove every limit, keep every cue.
+                  </p>
+                </div>
+              </div>
+              <Dialog.Close className="rounded-lg border border-white/10 p-1.5 text-slate-400 transition-colors hover:text-slate-100">
+                <X size={14} />
+              </Dialog.Close>
+            </div>
+          </div>
+
+          <div className="max-h-[calc(86vh-6rem)] overflow-y-auto px-6 py-5">
+            {demoActivated || alreadyPlus ? (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <span className="relative rounded-2xl bg-amber-500/10 p-4 text-amber-400">
+                  <span className="absolute inset-0 animate-ping-soft rounded-2xl bg-amber-400/20" />
+                  <Sparkles size={26} />
+                </span>
+                <p className="text-sm font-semibold text-slate-100">
+                  {alreadyPlus
+                    ? "You're already on Plus — unlimited everything."
+                    : "You're on Plus — unlimited everything."}
+                </p>
+                <p className="text-xs text-slate-500">
+                  {alreadyPlus
+                    ? "Your subscription is active — no new charge was made."
+                    : "No charge was made — enjoy Plus."}
+                </p>
+                <Dialog.Close asChild>
+                  <button type="button" className="btn-primary mt-2">
+                    Back to coaching
+                  </button>
+                </Dialog.Close>
+              </div>
+            ) : (
+              <>
+                {reason != null && reason.length > 0 && (
+                  <p className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    {reason}
+                  </p>
+                )}
+
+                <div className="flex items-baseline gap-2">
+                  <span className="text-4xl font-bold text-white">
+                    {priceDisplay}
+                  </span>
+                  <span className="text-sm text-slate-400">/ month</span>
+                </div>
+                <p className="mt-1.5 text-xs text-slate-500">
+                  Free plan: {freeSessions} coaching sessions and {freeScripts}{" "}
+                  scripts per month. Plus removes every limit.
+                </p>
+
+                <ul className="mt-5 flex flex-col gap-2.5">
+                  {FEATURES.map((feature) => (
+                    <li
+                      key={feature}
+                      className="flex items-start gap-2.5 text-sm text-slate-300"
+                    >
+                      <CheckCircle2
+                        size={15}
+                        className="mt-0.5 shrink-0 text-emerald-400"
+                      />
+                      {feature}
+                    </li>
+                  ))}
+                </ul>
+
+                {!paymentsLive && (
+                  <p className="mt-4 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-slate-400">
+                    No card required — your plan upgrades instantly.
+                  </p>
+                )}
+
+                {error !== null && (
+                  <p className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                    {error}
+                  </p>
+                )}
+
+                <button
+                  onClick={() => void upgrade()}
+                  disabled={busy}
+                  className="btn-gold btn-sheen mt-5 w-full py-3"
+                >
+                  {busy ? (
+                    <Loader2 size={16} className="animate-spin" />
+                  ) : (
+                    <CreditCard size={16} />
+                  )}
+                  {paymentsLive
+                    ? `Upgrade to Plus — ${priceDisplay}/mo`
+                    : `Activate Plus — ${priceDisplay}/mo`}
+                </button>
+                <p className="mt-2.5 text-center text-[11px] text-slate-600">
+                  Secure checkout · cancel anytime
+                </p>
+              </>
+            )}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}

@@ -1,0 +1,48 @@
+# ── Secrets / local configuration ───────────────────────────────────────
+# Never commit real credentials. Templates (*.example) are committed instead.
+.env
+.env.*
+!.env.example
+!.env.production.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+
+# ── Python ──────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ── Node / frontend ─────────────────────────────────────────────────────
+node_modules/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ── Build output ────────────────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+frontend/vite.config.ts.timestamp-*
+
+# ── Logs, OS, editors ───────────────────────────────────────────────────
+*.log
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

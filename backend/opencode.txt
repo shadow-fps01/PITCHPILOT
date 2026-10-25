@@ -1,0 +1,17 @@
+// Gemini provider snippet for the global OpenCode config (optional dev tool):
+// C:\Users\<you>\.config\opencode\opencode.json
+//
+// Set apiKey to your own GEMINI_API_KEY (read it from your local .env — never
+// paste a real key into a committed file). After editing the global config,
+// run `opencode reload` (or restart OpenCode), then pick a Gemini model with
+// /models (IDs look like google/gemini-*).
+{
+  "$schema": "https://opencode.ai/config.json",
+  "providers": {
+    "google": {
+      "settings": {
+        "apiKey": "YOUR_GEMINI_API_KEY_HERE"
+      }
+    }
+  }
+}
