@@ -551,11 +551,14 @@ docker compose up -d --build
 - **Auth hardening is on by default**: per-IP rate limits on register/login/
   resend, and WebSocket handshakes use short-lived tickets
   (`POST /api/auth/ws-ticket`) so long-lived JWTs never appear in URLs or logs.
-- **Email verification is opt-in**: set `REQUIRE_EMAIL_VERIFICATION=true` and
-  either `EMAIL_PROVIDER=smtp` with `SMTP_*` (VPS hosts) or
+- **Account email is optional and currently off**: without a configured
+  provider, the sign-in screen hides password recovery and no verification
+  mail is promised. To enable it later, set `REQUIRE_EMAIL_VERIFICATION=true`
+  and either `EMAIL_PROVIDER=smtp` with `SMTP_*` (VPS hosts) or
   `EMAIL_PROVIDER=resend` with `RESEND_API_KEY` (HTTPS; works on Render Free,
   which blocks outbound SMTP). Unverified accounts can sign in and browse but
-  cannot start a coaching session until they confirm.
+  cannot start a coaching session until they confirm. `GET
+  /api/auth/email-available` reports whether delivery is configured.
 - **Recording consent is on by default** (`REQUIRE_RECORDING_CONSENT=true`).
   The first signed-in screen asks the presenter to confirm they have permission
   to record everyone on the call; the acceptance timestamp and
@@ -570,7 +573,9 @@ docker compose up -d --build
   expire after `PASSWORD_RESET_TOKEN_MINUTES` (default 30). A successful reset
   increments `users.token_version`, immediately invalidating every old access
   token and WebSocket ticket. The endpoint returns the same generic response
-  for known and unknown email addresses.
+  for known and unknown email addresses. Password recovery is only offered
+  when an email provider is configured; otherwise the UI hides it and the API
+  returns `503`.
 - **Account lifecycle**: `GET /api/auth/export` returns the user's scripts,
   sessions/transcripts, knowledge cards, and billing history as JSON.
   `DELETE /api/auth/account` requires the current password, cancels any active
@@ -630,10 +635,10 @@ ALLOW_DEMO_BILLING=false
 PAYSTACK_CURRENCY=NGN
 PLUS_PRICE_AMOUNT=2250000
 PLUS_PRICE_DISPLAY=₦22,500
-REQUIRE_EMAIL_VERIFICATION=false             # true only after a Resend domain is verified
-EMAIL_PROVIDER=resend
-RESEND_API_KEY=<resend-key>
-EMAIL_FROM=PitchPilot <onboarding@resend.dev>  # temporary; use a verified domain for real users
+REQUIRE_EMAIL_VERIFICATION=false             # email delivery is off until a domain is verified
+# EMAIL_PROVIDER=resend                      # enable after verifying a sending domain
+# RESEND_API_KEY=<resend-key>
+# EMAIL_FROM=PitchPilot <no-reply@your-domain.com>
 PASSWORD_RESET_TOKEN_MINUTES=30
 REQUIRE_RECORDING_CONSENT=true
 CONSENT_VERSION=2026-10-24
@@ -652,11 +657,12 @@ dashboard's webhook and callback URLs. Add the webhook at
 `https://<api-host>/api/billing/webhook` in the Paystack dashboard; the
 frontend callback verifies the returned `reference`/`trxref` as a fallback.
 
-While no Resend domain is verified, keep `REQUIRE_EMAIL_VERIFICATION=false`;
-`onboarding@resend.dev` only delivers to the Resend account owner/test
-addresses. Once the domain is verified, set `EMAIL_FROM` to that domain and
-turn verification on. Password-reset emails need the same verified domain for
-real users.
+Account email is disabled in the current pilot: no email provider is set, so
+password recovery is hidden and no verification mail is sent. `onboarding@resend.dev`
+only delivers to the Resend account owner/test addresses, so it is not usable
+for real users. Once a sending domain is verified, set `EMAIL_PROVIDER=resend`,
+`RESEND_API_KEY`, and `EMAIL_FROM` to that domain, then turn verification on.
+Password-reset emails need the same verified domain.
 
 Render Static Sites and Cloudflare Pages copy `frontend/public/_headers` into
 the build. The default CSP allows `https://*.onrender.com` and
@@ -669,9 +675,9 @@ pages exist, it still records the presenter's permission confirmation.
 
 **Free-tier reality check:** Render Free sleeps after 15 minutes idle (≈1 min
 cold start), has 0.1 CPU / 512 MB RAM, 750 instance hours/month, 5 GB outbound,
-and can restart at any time. It also blocks outbound SMTP (use Resend or leave
-verification off). The app runs **one worker** because live sessions are
-in-process. This is a demo/pilot setup, not a production SLA: for paying
+and can restart at any time. It also blocks outbound SMTP; account email stays
+off until a verified Resend domain is available. The app runs **one worker**
+because live sessions are in-process. This is a demo/pilot setup, not a production SLA: for paying
 customers, use a paid API host, Redis-backed state, database backups, and a
 paid email provider. The Electron overlay and server-side screen capture are
 desktop-only; browser screen sharing is part of the hosted app.

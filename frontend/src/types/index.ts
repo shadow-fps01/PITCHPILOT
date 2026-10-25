@@ -33,6 +33,10 @@ export interface EmailVerificationStatus {
   sent: boolean;
 }
 
+export interface EmailAvailability {
+  available: boolean;
+}
+
 export interface MessageResponse {
   message: string;
 }

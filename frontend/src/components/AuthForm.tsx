@@ -59,6 +59,9 @@ export function AuthForm(): JSX.Element {
   const [mode, setMode] = useState<AuthMode>(
     initialResetToken === null ? "login" : "reset",
   );
+  // Hidden until we know the deployment can actually deliver the link. This
+  // avoids promising an email while account email is switched off.
+  const [emailAvailable, setEmailAvailable] = useState<boolean | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -86,6 +89,21 @@ export function AuthForm(): JSX.Element {
     return () => window.clearTimeout(timer);
   }, [initialResetToken]);
 
+  useEffect(() => {
+    let cancelled = false;
+    authApi
+      .emailAvailability()
+      .then((result) => {
+        if (!cancelled) setEmailAvailable(result.available);
+      })
+      .catch(() => {
+        if (!cancelled) setEmailAvailable(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const isAux = mode === "forgot" || mode === "reset";
   const showEmail = mode !== "reset";
   const showPasswordField = mode !== "forgot";
@@ -103,6 +121,11 @@ export function AuthForm(): JSX.Element {
     if (busy) return;
     setError(null);
     setInfo(null);
+
+    if (mode === "forgot" && emailAvailable === false) {
+      setError("Password recovery is temporarily unavailable. Please try again later.");
+      return;
+    }
 
     if (mode === "reset") {
       if (initialResetToken === null) {
@@ -248,6 +271,12 @@ export function AuthForm(): JSX.Element {
                     ? "Enter the email you signed up with and we'll send a single-use reset link."
                     : "Use a password you haven't used elsewhere. This link can only be used once."}
                 </p>
+                {mode === "forgot" && emailAvailable === false && (
+                  <p className="mt-2 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-relaxed text-amber-100/80">
+                    Password recovery is temporarily unavailable. Please try again
+                    later.
+                  </p>
+                )}
               </div>
             ) : (
               <Tabs.Root
@@ -304,7 +333,7 @@ export function AuthForm(): JSX.Element {
                 <label className="relative block">
                   <span className="flex items-center justify-between">
                     <span className="field-label !mb-0">Password</span>
-                    {mode === "login" && (
+                    {mode === "login" && emailAvailable === true && (
                       <button
                         type="button"
                         onClick={() => switchMode("forgot")}

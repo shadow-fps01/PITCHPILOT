@@ -22,6 +22,7 @@ from app.models.script import Script
 from app.models.user import PLAN_PLUS, User
 from app.schemas.auth import (
     AccountDeleteRequest,
+    EmailAvailability,
     ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
@@ -150,6 +151,16 @@ async def login(
     return _token_response(user)
 
 
+@router.get("/email-available", response_model=EmailAvailability)
+async def email_available() -> EmailAvailability:
+    """Public capability check for the sign-in screen.
+
+    Password recovery is hidden when this deployment cannot send email yet.
+    The response deliberately says nothing about which provider is configured.
+    """
+    return EmailAvailability(available=email_provider_configured(get_settings()))
+
+
 @router.post(
     "/forgot-password",
     response_model=MessageResponse,
@@ -164,14 +175,15 @@ async def forgot_password(
     cannot be used to enumerate accounts.
     """
     settings = get_settings()
+    if not email_provider_configured(settings):
+        logger.warning("Password reset requested but no email provider is configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Password recovery is temporarily unavailable. Please contact support.",
+        )
     user = await db.scalar(select(User).where(User.email == payload.email.lower()))
     if user is not None:
-        if email_provider_configured(settings):
-            asyncio.create_task(_send_password_reset(user))
-        else:
-            logger.warning(
-                "Password reset requested but no email provider is configured"
-            )
+        asyncio.create_task(_send_password_reset(user))
     return MessageResponse(
         message="If that email has an account, we've sent a reset link."
     )

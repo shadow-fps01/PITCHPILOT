@@ -25,7 +25,9 @@ real money.
 - [x] Paystack checkout + webhook handling. Test and live keys use the same
       code path; the plan cache is keyed by key fingerprint so swapping modes
       cannot reuse the wrong plan.
-- [x] Email verification via SMTP or Resend (Resend works on Render Free).
+- [x] Optional account email via SMTP or Resend. The current pilot leaves it
+      off until a verified sending domain exists; password recovery is hidden
+      while no provider is configured.
 - [x] Password reset: single-use, expiring links; reset revokes old JWTs and
       WebSocket tickets.
 - [x] Recording consent: blocking first-run dialog, server-side gate on
@@ -50,10 +52,11 @@ These cannot be completed from the codebase alone.
       password. Assume anything shared in a local `.env` is exposed.
 - [ ] **Database**: create Neon or Supabase Postgres, enable `pgvector`, use
       the pooled connection URL, decide backup/PITR needs.
-- [ ] **Email**: verify the Resend sending domain (SPF/DKIM), set `EMAIL_FROM`,
-      then enable `REQUIRE_EMAIL_VERIFICATION=true`. Until a domain is
-      verified, `onboarding@resend.dev` can only deliver to the Resend account
-      owner/test addresses; keep verification off.
+- [ ] **Email (deferred)**: Resend is intentionally disabled until a sending
+      domain is verified (SPF/DKIM). Until then keep
+      `REQUIRE_EMAIL_VERIFICATION=false`; the sign-in screen hides password
+      recovery. When the domain is ready, set `EMAIL_PROVIDER=resend`,
+      `RESEND_API_KEY`, and `EMAIL_FROM`, then enable verification.
 - [ ] **Billing currency**: local config is **NGN 22,500/month**. The production
       template is now aligned to NGN because this merchant has USD disabled on
       Paystack. If USD is enabled later, change `PAYSTACK_CURRENCY`,
@@ -98,8 +101,9 @@ These cannot be completed from the codebase alone.
      no-payment pilot.
    - `PAYSTACK_CURRENCY=NGN`, `PLUS_PRICE_AMOUNT=2250000`,
      `PLUS_PRICE_DISPLAY=₦22,500`
-   - `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM` (verified domain;
-     keep `REQUIRE_EMAIL_VERIFICATION=false` until then)
+   - leave email unset for now. After a sending domain is verified, set
+     `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, and `EMAIL_FROM`, then enable
+     verification. Keep `REQUIRE_EMAIL_VERIFICATION=false` until then.
    - `REQUIRE_RECORDING_CONSENT=true`, `CONSENT_VERSION`
    - `SIGNUPS_ENABLED=true` or `false`, `SIGNUP_ALLOWLIST`
    - `TRUST_PROXY_HEADERS=true` (Render is the only ingress)
@@ -147,8 +151,8 @@ Also verify manually:
 - [ ] Demo upgrade works (pilot) or Paystack test checkout opens and the
       callback verifies `reference`/`trxref` (paid).
 - [ ] Paystack webhook delivers a successful charge event.
-- [ ] Resend password-reset email arrives at the Resend account owner/test
-      address while no sending domain is verified.
+- [ ] If email is enabled: a password-reset email arrives at a real inbox.
+      While email is off, the sign-in screen hides password recovery.
 - [ ] Cancel subscription; confirm period-end behavior.
 - [ ] Export data downloads valid JSON.
 - [ ] Delete account; old token cannot sign in; user rows are gone.

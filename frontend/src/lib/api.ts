@@ -9,6 +9,7 @@ import type {
   BillingStatus,
   CheckoutResponse,
   CoachingSession,
+  EmailAvailability,
   EmailVerificationStatus,
   MessageResponse,
   Script,
@@ -112,6 +113,10 @@ export const authApi = {
     }),
 
   me: (): Promise<User> => request<User>("/auth/me"),
+
+  /** Whether this deployment can send password-reset and verification email. */
+  emailAvailability: (): Promise<EmailAvailability> =>
+    request<EmailAvailability>("/auth/email-available"),
 
   /** Confirm an email address from the link sent at registration. */
   verifyEmail: (token: string): Promise<User> =>

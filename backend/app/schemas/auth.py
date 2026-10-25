@@ -43,6 +43,12 @@ class VerificationStatus(BaseModel):
     sent: bool = False
 
 
+class EmailAvailability(BaseModel):
+    """Whether the deployment can currently deliver account emails."""
+
+    available: bool = False
+
+
 class WsTicketResponse(BaseModel):
     ticket: str
     expires_in: int

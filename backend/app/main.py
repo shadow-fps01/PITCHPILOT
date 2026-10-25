@@ -129,6 +129,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         logger.info(f"Signups: allowlist only ({len(settings.signup_allowlist)} addresses)")
     else:
         logger.info("Signups: closed (existing accounts can still sign in)")
+
+    from app.services.email import email_provider_configured
+
+    if email_provider_configured(settings):
+        logger.info(
+            "Email delivery: "
+            f"{settings.email_provider.strip().lower()} configured "
+            f"(verification {'on' if settings.require_email_verification else 'off'})"
+        )
+    else:
+        logger.info(
+            "Email delivery: disabled (no provider configured; password recovery hidden)"
+        )
     if not settings.require_recording_consent:
         logger.warning(
             "REQUIRE_RECORDING_CONSENT=false — users can start sessions without "
