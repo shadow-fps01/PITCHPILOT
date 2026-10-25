@@ -124,7 +124,10 @@ CORS concerns and the overlay's live stream works out of the box.
    always-on-top PiP window you park next to your Zoom/Meet call. It stays
    out of tab/window screen shares; if you must share your entire screen,
    use the Electron shell (`desktop/`) instead.
-5. Click **Start speaking**, and PitchPilot cues you live.
+5. Click **Start speaking** for mic-only coaching, or **Share screen + call
+   audio** to share the call tab/window and its audio. In Chrome/Edge, tick
+   **Share system audio** in the picker. PitchPilot mixes that audio with your
+   mic and sends downscaled screen frames for live vision.
 
 > **Zero-API-key demo mode** — with no STT keys configured, the backend's
 > mock provider streams a simulated filler-heavy pitch (~180 WPM), so pacing
@@ -213,14 +216,16 @@ The overlay is a **dialogue box** — think Cluely, built into PitchPilot:
   *Answer that* / *What should I say next?* / *See my screen*). The copilot
   answers using the transcript, your script outline and — with screen vision
   on — a **fresh screenshot taken at ask-time**.
-- **Screen toggle** — the `screen on/off` chip flips the vision worker live
-  (`{type:"screen"}` over the WebSocket), no restart.
+- **Screen share control** — the overlay's **Share screen + call audio**
+  button starts/stops browser capture and the vision worker live, no restart.
 - **One feed** — coaching cues (fillers, pacing) and RAG "Next up" cards
   flow through the same dialogue as compact system lines. Everything is
   persisted as `COPILOT_ASSIST` session events and shown in the session
   detail view.
 - **Share-safe by design** — the dialogue lives in the protected overlay
-  window (or the Electron shell), never in your screen share.
+  window (or the Electron shell), never in your screen share. When using
+  browser sharing, pick only the call tab/window; sharing your entire screen
+  can show the overlay to the other party.
 
 LLM chain: **Azure OpenAI (gpt-4o) → OpenRouter → keyless heuristic
 fallback** — the same escalation used by the script auditor, so it works
@@ -454,26 +459,33 @@ pulses the current word, WPM drives the progress-bar colour, and a stalled
 line gently breathes as a keep-going nudge. Toggle it in the overlay when a
 script with an outline is active.
 
-### F5 — Multi-modal screen vision (restored, prompts configurable)
-`app/services/vision.py` — a silent background worker grabs the primary
-display every 2 s, perceptual-hash gates unchanged frames, rate-limits the
-API calls, and feeds the description into the copilot, script-auditor and
-RAG prompts. **No agent prompt is hardcoded** — every prompt lives in
-settings and can be overridden from `backend/.env`:
+### F5 — Browser screen vision (client-captured, in-memory)
+`useAudioRecorder.ts` requests a screen/tab with
+`getDisplayMedia({video:true,audio:true})`, mixes the shared audio with the mic,
+and sends downscaled JPEG frames over the live WebSocket. `app/services/vision.py`
+analyzes the latest frame in memory, perceptual-hash gates unchanged frames,
+rate-limits API calls, and feeds the description into the copilot,
+script-auditor and RAG prompts. Frames are never persisted.
+
+Server-side `mss` capture is legacy/desktop-only and off in the hosted app.
+**No agent prompt is hardcoded** — every prompt lives in settings and can be
+overridden from `backend/.env`:
 
 ```ini
-VISION_PROMPT=…            # generic screen-description prompt
-VISION_ASK_PROMPT=…        # ask-time prompt; may contain {question}
-COPILOT_SUGGEST_PROMPT=…   # proactive suggestion system prompt (keep JSON reply shape)
-COPILOT_ASK_PROMPT=…       # typed-question system prompt (keep JSON reply shape)
+VISION_CLIENT_ENABLED=true       # browser screen/tab sharing
+VISION_SERVER_CAPTURE_ENABLED=false
+VISION_ENABLED=false             # legacy server capture only
+VISION_PROMPT=…                  # generic screen-description prompt
+VISION_ASK_PROMPT=…              # ask-time prompt; may contain {question}
+COPILOT_SUGGEST_PROMPT=…         # proactive suggestion system prompt (keep JSON reply shape)
+COPILOT_ASK_PROMPT=…             # typed-question system prompt (keep JSON reply shape)
 ```
 
 Vision provider chain (first usable answer wins): `gemini-3.5-flash` →
 `gemini-3.5-flash-lite` (higher free RPM) → **Azure gpt-4o** → NVIDIA NIM.
 A provider that 429s cools down 5 min while the next one answers; any other
-failure cools down 60 s. The worker is strictly opt-in: set
-`VISION_ENABLED=true` to start it with the API (off by default, and off in the
-container deployment).
+failure cools down 60 s. The browser worker starts on the first screen share
+and stops when sharing stops or the session ends; server-side capture stays off.
 
 Everything runs asynchronously: capture on daemon threads with asyncio
 hand-off, RAG/vision as fire-and-forget tasks, and every external call is
@@ -526,8 +538,10 @@ docker compose up -d --build
   readiness), and `GET /healthz` (web). Both images define Docker
   `HEALTHCHECK`s.
 - Leave `AUDIO_CAPTURE_ENABLED` and `VISION_ENABLED` **off** in containers:
-  native audio capture and screen capture are desktop features (the Electron
-  shell), and there is no audio device or display on a server.
+  native/server audio capture and server-side screen capture are desktop
+  features (the Electron shell), and there is no audio device or display on a
+  server. Browser screen sharing is separate: set
+  `VISION_CLIENT_ENABLED=true` and `VISION_SERVER_CAPTURE_ENABLED=false`.
 
 ### Operational notes
 
@@ -594,7 +608,7 @@ This split works without a card and is suitable for a demo or a small pilot:
 | Piece | Free service | Notes |
 | --- | --- | --- |
 | API + WebSocket | **Render Free Web Service** | Docker, context `backend`, Dockerfile `backend/Dockerfile`, health check `/api/health`. |
-| Frontend | **Cloudflare Pages** | Root `frontend`; build `npm ci && npm run build`; output `dist`; `VITE_API_BASE_URL=https://<api>.onrender.com/api`. |
+| Frontend | **Render Static Site** or **Cloudflare Pages** | Root `frontend`; build `npm ci && npm run build`; output `dist`; `VITE_API_BASE_URL=https://<api>.onrender.com/api`. |
 | Postgres + pgvector | **Neon Free** or **Supabase Free** | Neon auto-resumes; Supabase pauses after 7 days idle. Render's free Postgres expires after 30 days — don't use it. |
 
 Render environment (minimum):
@@ -610,12 +624,16 @@ STT_PROVIDER=groq
 GROQ_API_KEY=<groq-key>
 LLM_PROVIDER=openrouter                      # or heuristic with no key
 OPENROUTER_API_KEY=<openrouter-key>
-PAYMENTS_PROVIDER=demo                       # free demo, no card
-ALLOW_DEMO_BILLING=true
-REQUIRE_EMAIL_VERIFICATION=true              # use Resend on Render Free
+PAYMENTS_PROVIDER=paystack                   # test mode on the free pilot
+PAYSTACK_SECRET_KEY=sk_test_...              # replace with sk_live_ only when going live
+ALLOW_DEMO_BILLING=false
+PAYSTACK_CURRENCY=NGN
+PLUS_PRICE_AMOUNT=2250000
+PLUS_PRICE_DISPLAY=₦22,500
+REQUIRE_EMAIL_VERIFICATION=false             # true only after a Resend domain is verified
 EMAIL_PROVIDER=resend
 RESEND_API_KEY=<resend-key>
-EMAIL_FROM=PitchPilot <no-reply@your-domain.com>
+EMAIL_FROM=PitchPilot <onboarding@resend.dev>  # temporary; use a verified domain for real users
 PASSWORD_RESET_TOKEN_MINUTES=30
 REQUIRE_RECORDING_CONSENT=true
 CONSENT_VERSION=2026-10-24
@@ -624,16 +642,26 @@ SIGNUP_ALLOWLIST=[]                          # or ["you@example.com"]
 TRUST_PROXY_HEADERS=true                     # API is behind Render's proxy
 AUDIO_CAPTURE_ENABLED=false
 VISION_ENABLED=false
+VISION_CLIENT_ENABLED=true                   # browser screen/tab + system audio
+VISION_SERVER_CAPTURE_ENABLED=false
 ```
 
-For a smaller pilot, set `REQUIRE_EMAIL_VERIFICATION=false` and omit
-`EMAIL_PROVIDER`/`RESEND_API_KEY`; password-reset emails then need another
-delivery path. If you keep verification on, Resend requires a verified sending
-domain before it will deliver.
+Paystack test and live keys use the same code path: replace
+`PAYSTACK_SECRET_KEY=sk_test_...` with `sk_live_...`, then update the
+dashboard's webhook and callback URLs. Add the webhook at
+`https://<api-host>/api/billing/webhook` in the Paystack dashboard; the
+frontend callback verifies the returned `reference`/`trxref` as a fallback.
 
-Cloudflare Pages copies `frontend/public/_headers` into the build. The default
-CSP allows `https://*.onrender.com` and `wss://*.onrender.com`; if you use a
-custom API domain, update `connect-src` there.
+While no Resend domain is verified, keep `REQUIRE_EMAIL_VERIFICATION=false`;
+`onboarding@resend.dev` only delivers to the Resend account owner/test
+addresses. Once the domain is verified, set `EMAIL_FROM` to that domain and
+turn verification on. Password-reset emails need the same verified domain for
+real users.
+
+Render Static Sites and Cloudflare Pages copy `frontend/public/_headers` into
+the build. The default CSP allows `https://*.onrender.com` and
+`wss://*.onrender.com`; if you use a custom API domain, update `connect-src`
+there.
 
 The consent dialog links to the legal pages only when
 `VITE_PRIVACY_URL` / `VITE_TERMS_URL` are set at build time. Until those real
@@ -645,5 +673,5 @@ and can restart at any time. It also blocks outbound SMTP (use Resend or leave
 verification off). The app runs **one worker** because live sessions are
 in-process. This is a demo/pilot setup, not a production SLA: for paying
 customers, use a paid API host, Redis-backed state, database backups, and a
-paid email provider. The Electron overlay and screen vision are desktop-only
-and are not part of the hosted deployment.
+paid email provider. The Electron overlay and server-side screen capture are
+desktop-only; browser screen sharing is part of the hosted app.

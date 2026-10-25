@@ -1044,6 +1044,12 @@ export function OverlayWidget(): JSX.Element {
                       <Monitor size={13} /> Share screen + call audio
                     </button>
                   )}
+                  {screenAvailable && !recorder.screenActive && (
+                    <p className="text-center text-[9px] leading-tight text-slate-600">
+                      Pick the call tab or window, then tick "Share system
+                      audio".
+                    </p>
+                  )}
                   {recorder.screenActive && (
                     <button
                       onClick={stopScreen}
