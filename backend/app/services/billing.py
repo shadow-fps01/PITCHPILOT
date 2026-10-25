@@ -38,8 +38,10 @@ PAYSTACK_BASE_URL = "https://api.paystack.co"
 PLAN_NAME = "PitchPilot Plus (Monthly)"
 METADATA_PURPOSE = "pitchpilot_plus"
 
-# Module-level cache for the Paystack plan code, keyed by (amount, currency).
-_plan_code_cache: dict[tuple[int, str], str] = {}
+# Module-level cache for the Paystack plan code. The key fingerprint is part of
+# the cache key so swapping a test key for a live key (or switching merchant
+# accounts) can never reuse a plan code from the wrong Paystack mode.
+_plan_code_cache: dict[tuple[int, str, str], str] = {}
 
 # ── Payment reconciliation tuning ─────────────────────────────────────
 # How often a user's Paystack history may be re-checked (seconds) and how far
@@ -64,6 +66,28 @@ def resolve_provider(settings: Settings) -> str:
 
 def payments_live(settings: Settings) -> bool:
     return resolve_provider(settings) == PROVIDER_PAYSTACK
+
+
+def paystack_key_mode(settings: Settings) -> str:
+    """Return "test" or "live" without ever exposing the secret key.
+
+    Paystack's API is identical in both modes; only the key changes. Keeping
+    this derived value in logs and cache keys makes a test→live swap a pure
+    environment-variable change.
+    """
+    key = settings.paystack_secret_key.strip()
+    if key.startswith("sk_live_"):
+        return "live"
+    if key.startswith("sk_test_"):
+        return "test"
+    return "unknown"
+
+
+def _paystack_key_fingerprint(settings: Settings) -> str:
+    key = settings.paystack_secret_key.strip()
+    if not key:
+        return "none"
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 # ── Monthly quota helpers ──────────────────────────────────────────────
@@ -276,7 +300,11 @@ async def _ensure_customer(db: AsyncSession, user: User, settings: Settings) -> 
 
 async def _ensure_plan(settings: Settings) -> str:
     """Return the recurring plan code for PitchPilot Plus, caching per config."""
-    cache_key = (settings.plus_price_amount, settings.paystack_currency)
+    cache_key = (
+        settings.plus_price_amount,
+        settings.paystack_currency.upper(),
+        _paystack_key_fingerprint(settings),
+    )
     if cache_key in _plan_code_cache:
         return _plan_code_cache[cache_key]
     plan_code: str | None = None
@@ -396,7 +424,10 @@ async def start_checkout(
         )
     )
     await db.commit()
-    logger.info(f"Paystack checkout initialized for {user.email}")
+    logger.info(
+        f"Paystack checkout initialized for {user.email} "
+        f"({paystack_key_mode(settings)} key)"
+    )
     return {"mode": PROVIDER_PAYSTACK, "authorization_url": authorization_url}
 
 

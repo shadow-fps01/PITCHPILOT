@@ -71,6 +71,7 @@ class SessionStatusMessage(BaseModel):
     stt_provider: str
     capture_available: bool = False
     capture_active: bool = False
+    vision_available: bool = False
     vision_active: bool = False
     anticipation_active: bool = False
     copilot_active: bool = False
@@ -192,10 +193,21 @@ class ClientAsk(BaseModel):
 
 
 class ScreenCommand(BaseModel):
-    """Toggle the screen-vision worker for the live copilot (F5)."""
+    """Toggle screen vision for the live copilot (F5)."""
 
     type: Literal["screen"] = "screen"
     action: Literal["start", "stop"] = "start"
+
+
+class ClientScreenFrame(BaseModel):
+    """One browser-shared screen frame (base64 JPEG), sent sparingly.
+
+    The frame is analyzed for the live copilot and then discarded; it is
+    never written to the database or logs.
+    """
+
+    type: Literal["screen_frame"] = "screen_frame"
+    image: str = Field(min_length=16, max_length=4_000_000)
 
 
 class ClientTune(BaseModel):
@@ -206,7 +218,15 @@ class ClientTune(BaseModel):
 
 
 ClientMessage = Annotated[
-    Union[ClientPing, ClientStop, CaptureCommand, ClientAsk, ScreenCommand, ClientTune],
+    Union[
+        ClientPing,
+        ClientStop,
+        CaptureCommand,
+        ClientAsk,
+        ScreenCommand,
+        ClientScreenFrame,
+        ClientTune,
+    ],
     Field(discriminator="type"),
 ]
 

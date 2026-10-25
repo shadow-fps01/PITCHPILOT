@@ -35,7 +35,7 @@ class GeminiEmbeddingClient(EmbeddingClient):
     async def embed(self, text: str) -> list[float] | None:
         if self._disabled:
             return None
-        url = f"{_GEMINI_BASE}/models/{self._model}:embedContent?key={self._api_key}"
+        url = f"{_GEMINI_BASE}/models/{self._model}:embedContent"
         body = {
             "model": f"models/{self._model}",
             "content": {"parts": [{"text": text[:_MAX_TEXT_CHARS]}]},
@@ -45,7 +45,11 @@ class GeminiEmbeddingClient(EmbeddingClient):
         }
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(url, json=body)
+                response = await client.post(
+                    url,
+                    headers={"x-goog-api-key": self._api_key},
+                    json=body,
+                )
                 response.raise_for_status()
                 values = response.json()["embedding"]["values"]
                 self._failures = 0

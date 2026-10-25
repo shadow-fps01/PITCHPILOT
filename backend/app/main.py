@@ -78,29 +78,43 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     anticipator_mode = "vector search (Gemini embeddings)" if get_shared_embedding_client() is not None else "keyword search (no embedding key)"
     logger.info(f"Next-topic anticipation: {'enabled — ' + anticipator_mode if settings.anticipation_enabled else 'disabled'}")
 
-    # F5: screen-vision worker (copilot screen-awareness; prompts come from
-    # VISION_PROMPT / VISION_ASK_PROMPT in settings — nothing hardcoded).
-    # Opt-in ONLY: screen frames are captured and sent to the configured
-    # providers exclusively when VISION_ENABLED=true. The live copilot works
-    # from the call transcript without it; the `screen` WebSocket command is
-    # ignored while the feature is disabled.
+    # F5: screen vision. Hosted web clients share a tab/window explicitly and
+    # send frames over their live WebSocket; a server-side mss capture is only
+    # started for the desktop/native setup when both flags are on.
     vision_worker = None
     from app.services.vision import vision_available
 
-    if vision_available(settings) and settings.vision_enabled:
+    if (
+        vision_available(settings)
+        and settings.vision_enabled
+        and settings.vision_server_capture_enabled
+    ):
         from app.services.vision import ScreenVisionWorker, set_shared_worker
 
         vision_worker = ScreenVisionWorker(settings)
         vision_worker.start()
         set_shared_worker(vision_worker)
         logger.info(
-            "Screen-vision worker: active (screen frames go to the configured "
+            "Server screen capture: active (screen frames go to the configured "
             f"vision providers: {' -> '.join(vision_worker.providers)})"
         )
     else:
         logger.info(
-            "Screen-vision worker: disabled (opt-in) "
+            "Server screen capture: disabled "
             f"(VISION_ENABLED={settings.vision_enabled}, "
+            "VISION_SERVER_CAPTURE_ENABLED="
+            f"{settings.vision_server_capture_enabled})"
+        )
+
+    if settings.vision_client_enabled and vision_available(settings):
+        logger.info(
+            "Browser screen sharing: available (client-initiated; "
+            "frames arrive over the live WebSocket)"
+        )
+    else:
+        logger.info(
+            "Browser screen sharing: disabled "
+            f"(VISION_CLIENT_ENABLED={settings.vision_client_enabled}, "
             f"providers={'none' if not vision_available(settings) else 'configured'})"
         )
 
@@ -122,11 +136,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
 
     # Billing — PitchPilot Plus (Paystack subscription, demo fallback)
-    from app.services.billing import resolve_provider
+    from app.services.billing import paystack_key_mode, resolve_provider
 
     payments_mode = resolve_provider(settings)
+    paystack_mode = (
+        f" ({paystack_key_mode(settings)} key)"
+        if payments_mode == "paystack"
+        else ""
+    )
     logger.info(
-        f"Payments: {payments_mode} — Plus {settings.plus_price_display}/mo "
+        f"Payments: {payments_mode}{paystack_mode} — Plus "
+        f"{settings.plus_price_display}/mo "
         f"({settings.free_monthly_sessions} free sessions & "
         f"{settings.free_monthly_scripts} free scripts per month on the free plan)"
     )

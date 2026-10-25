@@ -19,6 +19,8 @@ period (`WS_RECONNECT_GRACE_SECONDS`) via the `LiveSessionRegistry`.
 """
 
 import asyncio
+import base64
+import binascii
 import time
 import uuid
 
@@ -39,6 +41,7 @@ from app.schemas.stream import (
     ClientAsk,
     ClientMessage,
     ClientPing,
+    ClientScreenFrame,
     ClientStop,
     ClientTune,
     ContextCardMessage,
@@ -61,7 +64,11 @@ from app.services.copilot_chat import CopilotInsight
 from app.services.debrief import generate_debrief, heuristic_debrief
 from app.services.session_registry import registry
 from app.services.stt import TranscriptChunk, build_stt_provider
-from app.services.vision import ensure_shared_worker, shared_worker
+from app.services.vision import (
+    ScreenVisionWorker,
+    shared_worker,
+    vision_available,
+)
 from app.services.ws_tickets import ws_tickets
 
 router = APIRouter()
@@ -292,38 +299,72 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         logger.info(f"Copilot question received on session {sid} ({len(question)} chars)")
         asyncio.create_task(state.copilot.ask(question, message.id))
 
+    # Browser screen sharing is explicitly toggled by the client. Keep the
+    # flag per connection so a frame that was already in flight when the user
+    # pressed "stop" cannot silently restart the worker.
+    screen_client_on = {"value": False}
+    last_screen_frame_at = {"value": -1e9}
+
+    def bind_screen_worker(worker: ScreenVisionWorker) -> None:
+        """Point this session's copilot/coach at the browser-frame worker."""
+        if state.copilot is not None:
+            state.copilot.screen_provider = worker.latest_context
+            state.copilot.fresh_screen_provider = worker.describe_now
+        state.coach.screen_context_provider = worker.latest_context
+
+    async def ensure_screen_worker() -> ScreenVisionWorker | None:
+        if not settings.vision_client_enabled or not vision_available(settings):
+            return None
+        worker = state.screen_worker
+        if worker is not None and worker.active:
+            bind_screen_worker(worker)
+            return worker
+        worker = ScreenVisionWorker(settings, capture_source="client")
+        worker.start()
+        if not worker.active:
+            return None
+        state.screen_worker = worker
+        bind_screen_worker(worker)
+        return worker
+
+    def vision_is_active() -> bool:
+        if state.screen_worker is not None and state.screen_worker.active:
+            return True
+        worker = shared_worker()
+        return worker is not None and worker.active
+
     async def handle_screen_command(message: ScreenCommand) -> None:
         if message.action == "start":
-            worker = ensure_shared_worker(settings)
+            screen_client_on["value"] = True
+            worker = await ensure_screen_worker()
             if worker is None:
+                screen_client_on["value"] = False
                 emit(
                     CopilotMessage(
                         id=uuid.uuid4().hex,
                         kind="status",
-                        text=(
-                            "Screen vision isn't available right now."
-                        ),
+                        text="Screen vision isn't available right now.",
                     )
                 )
+                emit(status_message())
                 return
-            # Rebind screen context providers onto the (possibly new) worker.
-            state.copilot.screen_provider = worker.latest_context
-            state.copilot.fresh_screen_provider = worker.describe_now
-            state.coach.screen_context_provider = worker.latest_context
             emit(
                 CopilotMessage(
                     id=uuid.uuid4().hex,
                     kind="status",
-                    text="Screen vision on — I can see what you see now.",
+                    text="Screen vision on — I can see what you share now.",
                 )
             )
         else:
-            worker = shared_worker()
+            screen_client_on["value"] = False
+            worker = state.screen_worker
+            state.screen_worker = None
             if worker is not None:
                 await worker.stop()
-            from app.services.vision import set_shared_worker
-
-            set_shared_worker(None)
+            if state.copilot is not None:
+                state.copilot.screen_provider = None
+                state.copilot.fresh_screen_provider = None
+            state.coach.screen_context_provider = None
             emit(
                 CopilotMessage(
                     id=uuid.uuid4().hex,
@@ -331,16 +372,44 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                     text="Screen vision off — I'll rely on the call audio only.",
                 )
             )
-        current = shared_worker()
-        emit(
-            SessionStatusMessage(
-                stt_provider=provider_name,
-                capture_available=capture_available(settings),
-                vision_active=current is not None and current.active,
-                anticipation_active=state.anticipation is not None,
-                copilot_active=state.copilot is not None,
+        emit(status_message())
+
+    async def handle_screen_frame(message: ClientScreenFrame) -> None:
+        """Accept a browser-shared JPEG, analyze it, then discard it.
+
+        The worker only keeps the latest frame and its derived description;
+        the image itself is never persisted or logged.
+        """
+        if not screen_client_on["value"]:
+            return
+        now = time.monotonic()
+        if now - last_screen_frame_at["value"] < 0.4:
+            return  # ignore floods / duplicate in-flight frames
+        last_screen_frame_at["value"] = now
+
+        worker = await ensure_screen_worker()
+        if worker is None:
+            screen_client_on["value"] = False
+            emit(
+                CopilotMessage(
+                    id=uuid.uuid4().hex,
+                    kind="status",
+                    text="Screen vision isn't available right now.",
+                )
             )
-        )
+            emit(status_message())
+            return
+
+        image = message.image.strip()
+        if image.startswith("data:"):
+            _, _, image = image.partition(",")
+        try:
+            jpeg = base64.b64decode(image, validate=True)
+        except (ValueError, binascii.Error):
+            return
+        if len(jpeg) < 4 or not jpeg.startswith(b"\xff\xd8\xff"):
+            return
+        worker.submit_frame(jpeg)
 
     # ── Native dual-audio capture handoff (F1) ─────────────────────────
     loop = asyncio.get_running_loop()
@@ -363,6 +432,19 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         capture_level["value"] = level
 
     capture_service: NativeCaptureService | None = None
+
+    def status_message() -> SessionStatusMessage:
+        return SessionStatusMessage(
+            stt_provider=provider_name,
+            capture_available=capture_available(settings),
+            capture_active=capture_service is not None,
+            vision_available=(
+                settings.vision_client_enabled and vision_available(settings)
+            ),
+            vision_active=vision_is_active(),
+            anticipation_active=state.anticipation is not None,
+            copilot_active=state.copilot is not None,
+        )
 
     async def start_capture() -> None:
         nonlocal capture_service
@@ -420,16 +502,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
     provider, provider_name = build_stt_provider(on_transcript)
     emit(SessionStartedMessage(session_id=sid, started_at=state.started_at))
 
-    vision_worker = shared_worker()
-    emit(
-        SessionStatusMessage(
-            stt_provider=provider_name,
-            capture_available=capture_available(settings),
-            vision_active=vision_worker is not None and vision_worker.active,
-            anticipation_active=state.anticipation is not None,
-            copilot_active=state.copilot is not None,
-        )
-    )
+    emit(status_message())
 
     # ── Background pumps ─────────────────────────────────────────────
     drain = asyncio.Event()
@@ -508,6 +581,8 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 )
             elif isinstance(client_message, ScreenCommand):
                 await handle_screen_command(client_message)
+            elif isinstance(client_message, ClientScreenFrame):
+                await handle_screen_frame(client_message)
             elif isinstance(client_message, ClientStop):
                 ended_gracefully = True
                 break

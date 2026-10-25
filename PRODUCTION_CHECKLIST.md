@@ -1,22 +1,30 @@
 # PitchPilot production checklist
 
 This is the deployment runbook for the hosted web app. Desktop/Electron
-packaging, native audio capture, and screen vision are intentionally out of
-scope for the server deployment.
+packaging and native audio capture are intentionally out of scope for the
+server deployment. Browser screen sharing is in scope: the frontend captures a
+screen/tab plus system audio and sends downscaled frames over the live
+WebSocket. The API never captures the host screen.
 
 ## 1. Choose the launch mode first
 
 | Mode | What it is | What it is not |
 | --- | --- | --- |
-| **Free pilot** | Render Free API + Cloudflare Pages + Neon/Supabase Free. Demo billing, one worker, invite-only or closed signups. | An SLA, a paid product, or a place for real payments. |
+| **Free pilot** | Render Free API + Render Static Site (or Cloudflare Pages) + Neon/Supabase Free. Demo or Paystack **test** billing, one worker, invite-only or closed signups. | An SLA, a paid product, or a place for real payments. |
 | **Paid production** | Paid API host, managed Postgres with backups, Redis for multi-worker state, Resend, live Paystack, custom domain, legal pages. | Free. There is no reliable no-card paid-production path. |
 
-Do not mix them. A free pilot with `ALLOW_DEMO_BILLING=true` must not take real
-money.
+Do not mix them. A free pilot with demo or Paystack test billing must not take
+real money.
 
 ## 2. Code-side work already in place
 
 - [x] Live transcription through Groq (`whisper-large-v3-turbo`).
+- [x] Browser screen sharing: screen/tab + system audio via `getDisplayMedia`,
+      mixed with the mic, with downscaled JPEG frames analyzed in memory. No
+      server-side host-screen capture in the hosted deployment.
+- [x] Paystack checkout + webhook handling. Test and live keys use the same
+      code path; the plan cache is keyed by key fingerprint so swapping modes
+      cannot reuse the wrong plan.
 - [x] Email verification via SMTP or Resend (Resend works on Render Free).
 - [x] Password reset: single-use, expiring links; reset revokes old JWTs and
       WebSocket tickets.
@@ -42,16 +50,25 @@ These cannot be completed from the codebase alone.
       password. Assume anything shared in a local `.env` is exposed.
 - [ ] **Database**: create Neon or Supabase Postgres, enable `pgvector`, use
       the pooled connection URL, decide backup/PITR needs.
-- [ ] **Email**: create Resend account, verify the sending domain (SPF/DKIM),
-      set `EMAIL_FROM`, then enable `REQUIRE_EMAIL_VERIFICATION=true`.
+- [ ] **Email**: verify the Resend sending domain (SPF/DKIM), set `EMAIL_FROM`,
+      then enable `REQUIRE_EMAIL_VERIFICATION=true`. Until a domain is
+      verified, `onboarding@resend.dev` can only deliver to the Resend account
+      owner/test addresses; keep verification off.
 - [ ] **Billing currency**: local config is **NGN 22,500/month**. The production
       template is now aligned to NGN because this merchant has USD disabled on
       Paystack. If USD is enabled later, change `PAYSTACK_CURRENCY`,
       `PLUS_PRICE_AMOUNT`, and `PLUS_PRICE_DISPLAY` together.
-- [ ] **Paystack live**: business verification, live keys, webhook URL
-      `https://<api-host>/api/billing/webhook`, callback URL, and an end-to-end
-      test with a test/live transaction. For the free pilot use
-      `PAYMENTS_PROVIDER=demo` + `ALLOW_DEMO_BILLING=true` instead.
+- [ ] **Paystack**: use webhook
+      `https://pitchpilot-w7dj.onrender.com/api/billing/webhook` and callback
+      `https://pitchpilot-web.onrender.com/?view=dashboard&billing=success` for
+      the current hosts. Test with `sk_test_...`, then replace only
+      `PAYSTACK_SECRET_KEY` with `sk_live_...` and update the dashboard URLs.
+      For a no-payment pilot use `PAYMENTS_PROVIDER=demo` +
+      `ALLOW_DEMO_BILLING=true` instead.
+- [ ] **Browser capture**: Chrome/Edge desktop is recommended for screen/tab
+      audio. Safari/Firefox may not expose system audio. Tell users to share
+      only the call tab/window and tick “Share system audio”; sharing the whole
+      screen can show the PitchPilot overlay.
 - [ ] **Legal**: privacy policy, terms, recording consent language, retention
       and deletion policy, subprocessors (Groq, Azure/OpenRouter, Gemini,
       Paystack, Resend, Neon/Supabase), support contact.
@@ -75,16 +92,25 @@ These cannot be completed from the codebase alone.
    - `JWT_SECRET_KEY` (64+ random hex)
    - `FRONTEND_BASE_URL` and exact `CORS_ORIGINS`
    - `STT_PROVIDER=groq` + `GROQ_API_KEY`
-   - `PAYMENTS_PROVIDER=demo` + `ALLOW_DEMO_BILLING=true` for the pilot
+   - `PAYMENTS_PROVIDER=paystack`, `PAYSTACK_SECRET_KEY=sk_test_...`,
+     `ALLOW_DEMO_BILLING=false` for checkout testing. Use
+     `PAYMENTS_PROVIDER=demo` + `ALLOW_DEMO_BILLING=true` only for a
+     no-payment pilot.
+   - `PAYSTACK_CURRENCY=NGN`, `PLUS_PRICE_AMOUNT=2250000`,
+     `PLUS_PRICE_DISPLAY=₦22,500`
+   - `EMAIL_PROVIDER=resend`, `RESEND_API_KEY`, `EMAIL_FROM` (verified domain;
+     keep `REQUIRE_EMAIL_VERIFICATION=false` until then)
    - `REQUIRE_RECORDING_CONSENT=true`, `CONSENT_VERSION`
    - `SIGNUPS_ENABLED=true` or `false`, `SIGNUP_ALLOWLIST`
    - `TRUST_PROXY_HEADERS=true` (Render is the only ingress)
    - `AUDIO_CAPTURE_ENABLED=false`, `VISION_ENABLED=false`
+   - `VISION_CLIENT_ENABLED=true`, `VISION_SERVER_CAPTURE_ENABLED=false`
 5. Deploy and confirm `GET /api/health` and `GET /api/ready` both return 200.
 6. Tail logs for the startup line showing the STT provider, signup mode, and
-   payments provider.
+   payments provider. The payments line must say `paystack (test key)` or
+   `paystack (live key)`, never demo when checkout is shown.
 
-## 5. Deploy the frontend (Cloudflare Pages)
+## 5. Deploy the frontend (Render Static Site or Cloudflare Pages)
 
 1. Root: `frontend`.
 2. Build: `npm ci && npm run build`.
@@ -92,8 +118,10 @@ These cannot be completed from the codebase alone.
 4. Environment: `VITE_API_BASE_URL=https://<api-host>/api`.
 5. Optional: `VITE_PRIVACY_URL`, `VITE_TERMS_URL`.
 6. Confirm `frontend/public/_headers` allows the API origin in
-   `connect-src` (default `https://*.onrender.com` / `wss://*.onrender.com`).
-7. Set the final Pages URL in the API's `FRONTEND_BASE_URL` and
+   `connect-src` (default `https://*.onrender.com` / `wss://*.onrender.com`)
+   and keeps `Permissions-Policy: display-capture=(self)` so the screen picker
+   can open.
+7. Set the final static-site URL in the API's `FRONTEND_BASE_URL` and
    `CORS_ORIGINS`, then redeploy the API if needed.
 
 ## 6. Verify before inviting users
@@ -109,9 +137,18 @@ Also verify manually:
 - [ ] Register → verification email arrives (if enabled) → verify.
 - [ ] Consent dialog appears; accepting it allows a session.
 - [ ] Start a session, speak, and see a real Groq transcript.
-- [ ] Reconnect the WebSocket mid-session.
+- [ ] Start a live session in Chrome/Edge, click “Share screen + call audio”,
+      share only the call tab/window with system audio, and confirm the screen
+      chip plus a screen-aware answer. Stop sharing and confirm mic-only
+      coaching continues.
+- [ ] Reconnect the WebSocket mid-session, including while screen sharing; the
+      share must re-arm automatically.
 - [ ] Hit the free quota and see the upgrade path.
-- [ ] Demo upgrade works (pilot) or Paystack test payment works (paid).
+- [ ] Demo upgrade works (pilot) or Paystack test checkout opens and the
+      callback verifies `reference`/`trxref` (paid).
+- [ ] Paystack webhook delivers a successful charge event.
+- [ ] Resend password-reset email arrives at the Resend account owner/test
+      address while no sending domain is verified.
 - [ ] Cancel subscription; confirm period-end behavior.
 - [ ] Export data downloads valid JSON.
 - [ ] Delete account; old token cannot sign in; user rows are gone.
@@ -123,9 +160,11 @@ Also verify manually:
   in-process.
 - Expect Render Free to sleep after 15 minutes idle (cold start) and restart
   without warning. Do not promise uptime.
-- Use demo billing only; do not accept real payments.
+- Use Paystack **test** keys or demo billing only; never live keys on a free
+  pilot, and never accept real payments there.
 - Prefer `SIGNUPS_ENABLED=false` or a small `SIGNUP_ALLOWLIST`.
-- Keep `REQUIRE_EMAIL_VERIFICATION=true` with Resend to reduce abuse.
+- Once a Resend domain is verified, keep `REQUIRE_EMAIL_VERIFICATION=true` to
+  reduce abuse.
 - Monitor DB size, 429s, and Render logs. Free Postgres tiers may pause/expire.
 - Have a rollback plan: previous Render deploy + Alembic downgrade only after a
   backup.
@@ -136,8 +175,14 @@ Also verify manually:
 - [ ] Move live-session registry, rate limits, and WS tickets to Redis before
       increasing workers.
 - [ ] Managed Postgres with backups/PITR.
-- [ ] Live Paystack keys, webhook delivery monitoring, refund/cancellation
-      policy, and tax/business details.
+- [ ] Replace `PAYSTACK_SECRET_KEY=sk_test_...` with `sk_live_...`, update the
+      dashboard webhook/callback URLs, and run a live transaction test. No code
+      change should be needed.
+- [ ] Paystack webhook delivery monitoring, refund/cancellation policy, and
+      tax/business details.
 - [ ] Verified Resend domain and a support inbox.
-- [ ] Real privacy/terms/consent pages linked from the app.
+- [ ] Privacy/terms/consent pages that cover screen frames, system audio,
+      subprocessors, retention, and deletion.
+- [ ] Rotate any provider key that may have appeared in old logs; the API now
+      sends Gemini keys in headers, never query strings.
 - [ ] Error tracking and uptime alerts.

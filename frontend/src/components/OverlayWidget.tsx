@@ -28,8 +28,10 @@ import {
   Check,
   Copy,
   CornerDownLeft,
+  Eye,
   EyeOff,
   Loader2,
+  Monitor,
   MessageSquareWarning,
   Mic,
   MicOff,
@@ -352,6 +354,7 @@ export function OverlayWidget(): JSX.Element {
     disconnect,
     sendAudio,
     sendControl,
+    sendScreenFrame,
   } = useWebSocket({
     url: wsUrl,
     autoConnect: true,
@@ -368,6 +371,19 @@ export function OverlayWidget(): JSX.Element {
     }
   }, [wsStatus, settings.cueSensitivity, sendControl]);
 
+  // Re-arm screen vision only when the socket itself (re)opens. Tracking the
+  // display state in a ref avoids sending a duplicate start command when the
+  // user first begins sharing on an already-open socket.
+  const screenActiveRef = useRef(recorder.screenActive);
+  useEffect(() => {
+    screenActiveRef.current = recorder.screenActive;
+  }, [recorder.screenActive]);
+  useEffect(() => {
+    if (wsStatus === "open" && screenActiveRef.current) {
+      sendControl({ type: "screen", action: "start" });
+    }
+  }, [wsStatus, sendControl]);
+
   // ── Auto-scroll the dialogue feed ────────────────────────────────────
   useEffect(() => {
     const feed = feedRef.current;
@@ -377,14 +393,78 @@ export function OverlayWidget(): JSX.Element {
   }, [dialogue]);
 
   // ── Controls ──────────────────────────────────────────────────────────
-  const startMic = useCallback(async (): Promise<void> => {
+  const handleScreenEnded = useCallback((): void => {
+    sendControl({ type: "screen", action: "stop" });
+  }, [sendControl]);
+
+  const startCapture = useCallback(
+    async (withScreen: boolean): Promise<void> => {
+      setSessionError(null);
+      try {
+        const result = await recorder.start(
+          (chunk) => sendAudio(chunk),
+          withScreen
+            ? {
+                withScreen: true,
+                onFrame: sendScreenFrame,
+                onEnded: handleScreenEnded,
+              }
+            : undefined,
+        );
+        if (withScreen) {
+          sendControl({ type: "screen", action: "start" });
+          if (!result.screenAudioActive) {
+            pushEntry({
+              role: "system",
+              text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”.",
+            });
+          }
+        }
+      } catch {
+        // The recorder shows a specific permission message in its banner;
+        // this is only a fallback for unexpected microphone failures.
+        if (!withScreen) {
+          setSessionError("Microphone unavailable — check browser permissions.");
+        }
+      }
+    },
+    [
+      recorder,
+      sendAudio,
+      sendScreenFrame,
+      sendControl,
+      handleScreenEnded,
+      pushEntry,
+    ],
+  );
+
+  const startMic = useCallback((): void => {
+    void startCapture(false);
+  }, [startCapture]);
+
+  const startScreen = useCallback(async (): Promise<void> => {
     setSessionError(null);
     try {
-      await recorder.start((chunk) => sendAudio(chunk));
+      const result = await recorder.startScreenShare({
+        onFrame: sendScreenFrame,
+        onEnded: handleScreenEnded,
+      });
+      sendControl({ type: "screen", action: "start" });
+      if (!result.screenAudioActive) {
+        pushEntry({
+          role: "system",
+          text: "No call audio was shared. Choose the call tab/window and tick “Share system audio”.",
+        });
+      }
     } catch {
-      setSessionError("Microphone unavailable — check browser permissions.");
+      // The recorder explains what happened and keeps the mic running.
     }
-  }, [recorder, sendAudio]);
+  }, [recorder, sendScreenFrame, sendControl, handleScreenEnded, pushEntry]);
+
+  const stopScreen = useCallback((): void => {
+    recorder.stopScreenShare();
+    sendControl({ type: "screen", action: "stop" });
+  }, [recorder, sendControl]);
 
   const startNativeCapture = useCallback((): void => {
     setSessionError(null);
@@ -422,13 +502,20 @@ export function OverlayWidget(): JSX.Element {
   }, []);
 
   const endSession = useCallback((): void => {
+    const hadScreen = recorder.screenActive;
     recorder.stop();
+    if (hadScreen) {
+      sendControl({ type: "screen", action: "stop" });
+    }
     disconnect(true);
-  }, [recorder, disconnect]);
+  }, [recorder, sendControl, disconnect]);
 
   const leaveSession = useCallback((): void => {
+    if (recorder.screenActive) {
+      sendControl({ type: "screen", action: "stop" });
+    }
+    recorder.stop();
     if (wsStatus === "open" || wsStatus === "reconnecting") {
-      recorder.stop();
       disconnect(false);
     }
     refreshSessions();
@@ -442,6 +529,7 @@ export function OverlayWidget(): JSX.Element {
   }, [
     wsStatus,
     recorder,
+    sendControl,
     disconnect,
     refreshSessions,
     setActiveSessionId,
@@ -520,6 +608,8 @@ export function OverlayWidget(): JSX.Element {
   const prompterAvailable =
     activeScript !== null && activeScript.content_outline.trim().length > 0;
   const prompterVisible = prompterOn && prompterAvailable;
+  const screenAvailable =
+    status?.vision_available === true && recorder.screenSupported;
 
   // Ambient glow behind the card, driven by the live mic level.
   const energy = Math.min(1, effectiveMicLevel);
@@ -596,6 +686,12 @@ export function OverlayWidget(): JSX.Element {
                 <Mic size={9} /> capture: {capture?.mode}
               </span>
             )}
+            {recorder.screenActive && (
+              <span className="chip-emerald">
+                <Eye size={9} />{" "}
+                {recorder.screenAudioActive ? "screen + call audio" : "screen"}
+              </span>
+            )}
             {status.copilot_active && (
               <span className="chip-violet">
                 <Sparkles size={9} /> copilot
@@ -622,7 +718,7 @@ export function OverlayWidget(): JSX.Element {
             </span>
             <div className="flex items-center gap-2">
               <span className="text-[9px] font-semibold uppercase tracking-widest text-slate-600">
-                mic
+                {recorder.screenAudioActive ? "call + mic" : "mic"}
               </span>
               <Waveform active={liveStarted} level={effectiveMicLevel} bars={6} />
             </div>
@@ -895,17 +991,17 @@ export function OverlayWidget(): JSX.Element {
                 </button>
               )}
 
-              <div className="flex gap-2">
-                {captureActive ? (
-                  <>
-                    <span className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-sm font-semibold text-emerald-300">
-                      <Mic size={15} /> Native capture: {capture?.mode}
-                    </span>
-                    <button onClick={endSession} className="btn-danger">
-                      <MicOff size={15} /> End
-                    </button>
-                  </>
-                ) : !recorder.isRecording ? (
+              {captureActive ? (
+                <div className="flex gap-2">
+                  <span className="flex flex-1 items-center justify-center gap-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-2.5 text-sm font-semibold text-emerald-300">
+                    <Mic size={15} /> Native capture: {capture?.mode}
+                  </span>
+                  <button onClick={endSession} className="btn-danger">
+                    <MicOff size={15} /> End
+                  </button>
+                </div>
+              ) : !recorder.isRecording ? (
+                <div className="flex flex-col gap-2">
                   <button
                     onClick={() => void startMic()}
                     disabled={
@@ -914,16 +1010,54 @@ export function OverlayWidget(): JSX.Element {
                       sessionId === null ||
                       effectiveToken === null
                     }
-                    className="btn-primary btn-sheen flex-1 animate-pulse-ring"
+                    className="btn-primary btn-sheen w-full animate-pulse-ring"
                   >
                     <Mic size={15} /> Start speaking
                   </button>
-                ) : (
-                  <button onClick={endSession} className="btn-danger flex-1">
+                  {screenAvailable && (
+                    <button
+                      onClick={() => void startCapture(true)}
+                      disabled={
+                        wsStatus === "connecting" ||
+                        wsStatus === "reconnecting" ||
+                        sessionId === null ||
+                        effectiveToken === null
+                      }
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2.5 text-[12px] font-semibold text-sky-200 transition-colors hover:border-sky-400/50 hover:bg-sky-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Monitor size={14} /> Share screen + call audio
+                    </button>
+                  )}
+                  {screenAvailable && (
+                    <p className="text-center text-[9px] leading-tight text-slate-600">
+                      Pick the call tab or window, then tick “Share system audio”.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {screenAvailable && !recorder.screenActive && (
+                    <button
+                      onClick={() => void startScreen()}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-[11.5px] font-semibold text-sky-200 transition-colors hover:border-sky-400/50 hover:bg-sky-500/15"
+                    >
+                      <Monitor size={13} /> Share screen + call audio
+                    </button>
+                  )}
+                  {recorder.screenActive && (
+                    <button
+                      onClick={stopScreen}
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[11.5px] font-semibold text-emerald-300 transition-colors hover:bg-emerald-500/15"
+                    >
+                      <Eye size={13} /> Screen sharing on
+                      {recorder.screenAudioActive ? " · call audio" : ""} — stop
+                    </button>
+                  )}
+                  <button onClick={endSession} className="btn-danger w-full">
                     <MicOff size={15} /> End session
                   </button>
-                )}
-              </div>
+                </div>
+              )}
 
               {/* native capture toggle (F1) */}
               {status?.capture_available === true && !recorder.isRecording && (

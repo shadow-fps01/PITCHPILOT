@@ -24,6 +24,7 @@ path never block.
 
 import asyncio
 import base64
+import hashlib
 import io
 import time
 
@@ -93,10 +94,17 @@ def resolve_vision_providers(settings: Settings) -> list[str]:
 
 
 class ScreenVisionWorker:
-    """Singleton-style background worker; owned by the app lifespan."""
+    """Background vision worker.
 
-    def __init__(self, settings: Settings) -> None:
+    In ``server`` mode it silently captures the host display with mss (desktop
+    only). In ``client`` mode it never touches the host display: the browser
+    sends the frames the user explicitly chose to share, and the worker keeps
+    only the latest frame plus a short-lived derived description.
+    """
+
+    def __init__(self, settings: Settings, *, capture_source: str = "server") -> None:
         self._settings = settings
+        self._capture_source = capture_source
         self._providers = resolve_vision_providers(settings)
         self._cooldowns: dict[str, float] = {}  # provider → skip-until (monotonic)
         self._task: asyncio.Task[None] | None = None
@@ -108,6 +116,12 @@ class ScreenVisionWorker:
         self._context: str | None = None
         self._context_at: float = -1e9
         self._failure_streak = 0
+        # Client-frame mode: latest browser frame + its byte hash. Frames are
+        # never persisted; only the provider's short description is retained.
+        self._latest_frame: bytes | None = None
+        self._latest_frame_hash: str | None = None
+        self._latest_frame_at: float = -1e9
+        self._last_analyzed_hash: str | None = None
 
     # ── Lifecycle ─────────────────────────────────────────────────────
     def start(self) -> None:
@@ -124,9 +138,11 @@ class ScreenVisionWorker:
         # reaches the next one within the copilot's answer budget.
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=4.0))
         self._task = asyncio.create_task(self._loop())
+        source = "browser frames" if self._capture_source == "client" else "server display"
         logger.info(
-            f"Screen-vision worker started (providers={' -> '.join(self._providers)}, "
-            f"interval={self._settings.vision_interval_seconds}s, capture-gated + "
+            f"Screen-vision worker started ({source}; "
+            f"providers={' -> '.join(self._providers)}, "
+            f"interval={self._settings.vision_interval_seconds}s, "
             f"rate-limited to one call / {self._settings.vision_min_interval_calls}s)"
         )
 
@@ -142,6 +158,10 @@ class ScreenVisionWorker:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        self._latest_frame = None
+        self._latest_frame_hash = None
+        self._latest_frame_at = -1e9
+        self._last_analyzed_hash = None
 
     @property
     def active(self) -> bool:
@@ -150,6 +170,23 @@ class ScreenVisionWorker:
     @property
     def providers(self) -> list[str]:
         return list(self._providers)
+
+    @property
+    def capture_source(self) -> str:
+        return self._capture_source
+
+    def submit_frame(self, jpeg: bytes) -> None:
+        """Accept a browser-shared JPEG frame without blocking the audio loop.
+
+        The worker's loop decides when to spend a provider call. Keeping only
+        the latest frame bounds memory and guarantees stale screens are never
+        analyzed after the user stops sharing.
+        """
+        if not jpeg or len(jpeg) > 4_000_000:
+            return
+        self._latest_frame = jpeg
+        self._latest_frame_hash = hashlib.sha1(jpeg).hexdigest()
+        self._latest_frame_at = time.monotonic()
 
     # ── Context access ─────────────────────────────────────────────────
     def latest_context(self) -> str | None:
@@ -174,10 +211,24 @@ class ScreenVisionWorker:
         if now - self._last_ondemand_at < 1.5:
             return self.latest_context()
         self._last_ondemand_at = now
-        grabbed = await asyncio.to_thread(_grab_frame)
-        if grabbed is None:
-            return None
-        jpeg, frame_hash = grabbed
+
+        if self._capture_source == "client":
+            jpeg = self._latest_frame
+            client_hash = self._latest_frame_hash
+            if (
+                jpeg is None
+                or client_hash is None
+                or now - self._latest_frame_at
+                > self._settings.vision_context_max_age_seconds
+            ):
+                return self.latest_context()
+            frame_hash: int | str = client_hash
+        else:
+            grabbed = await asyncio.to_thread(_grab_frame)
+            if grabbed is None:
+                return None
+            jpeg, frame_hash = grabbed
+
         if question:
             try:
                 prompt = self._settings.vision_ask_prompt.format(question=question)
@@ -188,7 +239,10 @@ class ScreenVisionWorker:
             prompt = self._settings.vision_prompt
         summary = await self._describe(jpeg, prompt=prompt, max_tokens=200)
         if summary:
-            self._last_hash = frame_hash
+            if self._capture_source == "client":
+                self._last_analyzed_hash = str(frame_hash)
+            else:
+                self._last_hash = int(frame_hash)
             self._context = summary
             self._context_at = time.monotonic()
             self._failure_streak = 0
@@ -201,6 +255,28 @@ class ScreenVisionWorker:
             if self._stop_event.is_set():
                 return
             try:
+                if self._capture_source == "client":
+                    jpeg = self._latest_frame
+                    client_hash = self._latest_frame_hash
+                    if jpeg is None or client_hash is None:
+                        continue
+                    if client_hash == self._last_analyzed_hash:
+                        continue  # unchanged browser frame — no API call
+                    now = time.monotonic()
+                    if (
+                        now - self._last_call_at
+                        < self._settings.vision_min_interval_calls
+                    ):
+                        continue  # rate limit — protects every provider's quota
+                    self._last_call_at = now
+                    summary = await self._describe(jpeg)
+                    if summary:
+                        self._last_analyzed_hash = client_hash
+                        self._context = summary
+                        self._context_at = time.monotonic()
+                        self._failure_streak = 0
+                    continue
+
                 grabbed = await asyncio.to_thread(_grab_frame)
                 if grabbed is None:
                     continue
@@ -281,7 +357,24 @@ class ScreenVisionWorker:
         self, model: str, jpeg: bytes, prompt: str, max_tokens: int
     ) -> str | None:
         assert self._client is not None
-        url = f"{_GEMINI_BASE}/models/{model}:generateContent?key={self._settings.gemini_api_key}"
+        url = f"{_GEMINI_BASE}/models/{model}:generateContent"
+        generation_config: dict[str, object] = {
+            "maxOutputTokens": max_tokens,
+            "temperature": 0.1,
+        }
+        # Gemini 3.x spends part of maxOutputTokens on internal reasoning. A
+        # screen description is a simple visual task, so keep thinking at its
+        # lightest supported level; otherwise a 120-token answer can be
+        # swallowed entirely by thought tokens.
+        if model.startswith("gemini-2.5-flash"):
+            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+        elif model.startswith(("gemini-3.5", "gemini-3.6", "gemini-3-flash")):
+            generation_config["thinkingConfig"] = {"thinkingLevel": "minimal"}
+        elif model.startswith("gemini-3.1-flash-lite"):
+            generation_config["thinkingConfig"] = {"thinkingLevel": "minimal"}
+        elif model.startswith("gemini-3"):
+            generation_config["thinkingConfig"] = {"thinkingLevel": "low"}
+
         body = {
             "contents": [
                 {
@@ -296,9 +389,13 @@ class ScreenVisionWorker:
                     ]
                 }
             ],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+            "generationConfig": generation_config,
         }
-        response = await self._client.post(url, json=body)
+        response = await self._client.post(
+            url,
+            headers={"x-goog-api-key": self._settings.gemini_api_key},
+            json=body,
+        )
         if response.status_code == 429:
             raise _RateLimited(model)
         response.raise_for_status()

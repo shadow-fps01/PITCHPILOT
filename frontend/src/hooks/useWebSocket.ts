@@ -21,6 +21,8 @@ export interface UseWebSocket {
   sendAudio: (chunk: ArrayBuffer) => void;
   /** Send a JSON control message (ping/stop/capture) when the socket is open. */
   sendControl: (message: ClientMessage) => void;
+  /** Send one browser-shared screen frame; dropped if the socket is down. */
+  sendScreenFrame: (image: string) => void;
 }
 
 type UrlSource = string | (() => Promise<string>);
@@ -277,6 +279,15 @@ export function useWebSocket({
     }
   }, []);
 
+  const sendScreenFrame = useCallback(
+    (image: string): void => {
+      // Screen frames are large and time-sensitive: never queue them during
+      // an outage. The next live frame will carry the current screen.
+      sendJson({ type: "screen_frame", image });
+    },
+    [sendJson],
+  );
+
   // Auto-connect when a URL (or resolver) is provided; hard cleanup on unmount.
   useEffect(() => {
     if (!autoConnect) return;
@@ -295,5 +306,13 @@ export function useWebSocket({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, autoConnect]);
 
-  return { status, reconnectAttempt, connect, disconnect, sendAudio, sendControl };
+  return {
+    status,
+    reconnectAttempt,
+    connect,
+    disconnect,
+    sendAudio,
+    sendControl,
+    sendScreenFrame,
+  };
 }

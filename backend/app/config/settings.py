@@ -116,7 +116,15 @@ class Settings(BaseSettings):
     # Provider chain: VISION_MODEL → VISION_FALLBACK_MODEL → azure → nvidia.
     # First usable answer wins; a provider that 429s cools down 5 min.
     vision_provider: str = "auto"     # auto | gemini | azure | nvidia
-    vision_enabled: bool = False      # opt-in: sends screen frames to the provider
+    # Silent server-side screen capture (mss) is desktop-only. Hosted web
+    # deployments should leave this off; browser clients share their own
+    # screen explicitly and send frames over the live WebSocket.
+    vision_enabled: bool = False
+    vision_server_capture_enabled: bool = False
+    # Browser-initiated screen sharing + vision. This is user-driven (the
+    # browser's own screen picker), never a silent capture, so it can be on
+    # by default whenever a vision provider is configured.
+    vision_client_enabled: bool = True
     vision_model: str = "gemini-3.5-flash"
     vision_fallback_model: str = "gemini-3.5-flash-lite"  # multimodal, higher free RPM
     nvidia_api_key: str = ""          # NVIDIA NIM (build.nvidia.com) — vision fallback

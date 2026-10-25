@@ -12,8 +12,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from loguru import logger
+
+if TYPE_CHECKING:
+    from app.services.vision import ScreenVisionWorker
 
 from app.config.settings import get_settings
 from app.db.session import async_session_factory
@@ -38,6 +42,7 @@ class LiveSessionState:
     anticipation: "NextTopicAnticipator | None" = None  # F3 RAG
     context_cards: int = 0  # surfaced cards this session (for the end summary)
     copilot: CopilotChat | None = None  # Cluely-style dialogue engine
+    screen_worker: "ScreenVisionWorker | None" = None  # client-shared screen frames
 
 
 class LiveSessionRegistry:
@@ -153,6 +158,9 @@ class LiveSessionRegistry:
         await state.coach.aclose()
         if state.copilot is not None:
             await state.copilot.aclose()
+        if state.screen_worker is not None:
+            await state.screen_worker.stop()
+            state.screen_worker = None
         duration_seconds = (
             int(state.coach.elapsed()) if state.coach.started_at is not None else 0
         )

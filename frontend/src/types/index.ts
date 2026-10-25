@@ -231,6 +231,7 @@ export type ClientMessage =
   | { type: "capture"; action: "start" | "stop" }
   | { type: "ask"; id: string; text: string }
   | { type: "screen"; action: "start" | "stop" }
+  | { type: "screen_frame"; image: string }
   | { type: "tune"; sensitivity: CueSensitivity };
 
 // ── Copilot dialogue (Cluely-style) ─────────────────────────────────────
@@ -273,6 +274,7 @@ export interface SessionStatusMessage {
   stt_provider: string;
   capture_available: boolean;
   capture_active: boolean;
+  vision_available: boolean;
   vision_active: boolean;
   anticipation_active: boolean;
   copilot_active: boolean;
