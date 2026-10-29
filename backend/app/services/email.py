@@ -22,6 +22,15 @@ from app.config.settings import Settings
 _RESEND_URL = "https://api.resend.com/emails"
 
 
+def _mask_email(address: str) -> str:
+    """Keep logs useful without writing the full recipient address to disk."""
+    local, separator, domain = address.partition("@")
+    if not separator:
+        return "***"
+    prefix = local[:1] if local else ""
+    return f"{prefix}***@{domain}"
+
+
 def email_provider_configured(settings: Settings) -> bool:
     """True when the selected provider has the credentials it needs."""
     provider = settings.email_provider.strip().lower()
@@ -62,7 +71,7 @@ async def _send_resend(settings: Settings, to: str, subject: str, body: str) -> 
     if not response.is_success:
         # Keep provider response out of user-facing paths; log only the status.
         logger.warning(
-            f"Resend rejected {subject!r} for {to}: "
+            f"Resend rejected {subject!r} for {_mask_email(to)}: "
             f"HTTP {response.status_code}"
         )
         response.raise_for_status()
@@ -73,28 +82,34 @@ async def send_email(settings: Settings, *, to: str, subject: str, body: str) ->
     provider = settings.email_provider.strip().lower()
     if provider == "resend":
         if not settings.resend_api_key:
-            logger.warning("RESEND_API_KEY missing — not sending verification email")
+            logger.warning("RESEND_API_KEY missing  -  not sending verification email")
             return False
         try:
             await _send_resend(settings, to, subject, body)
-            logger.info(f"Email sent to {to}: {subject}")
+            logger.info(f"Email sent to {_mask_email(to)}: {subject}")
             return True
-        except Exception as exc:  # noqa: BLE001 — email must never break the request
-            logger.warning(f"Email send failed to {to}: {exc}")
+        except Exception as exc:  # noqa: BLE001  -  email must never break the request
+            logger.warning(
+                f"Email send failed to {_mask_email(to)}: {type(exc).__name__}"
+            )
             return False
 
     if provider != "smtp":
-        logger.warning(f"Unknown EMAIL_PROVIDER={provider!r} — not sending email")
+        logger.warning(f"Unknown EMAIL_PROVIDER={provider!r}  -  not sending email")
         return False
     if not settings.smtp_host:
-        logger.warning(f"SMTP not configured — not sending {subject!r} to {to}")
+        logger.warning(
+            f"SMTP not configured  -  not sending {subject!r} to {_mask_email(to)}"
+        )
         return False
     try:
         await asyncio.to_thread(_send_smtp_sync, settings, to, subject, body)
-        logger.info(f"Email sent to {to}: {subject}")
+        logger.info(f"Email sent to {_mask_email(to)}: {subject}")
         return True
-    except Exception as exc:  # noqa: BLE001 — email must never break the request
-        logger.warning(f"Email send failed to {to}: {exc}")
+    except Exception as exc:  # noqa: BLE001  -  email must never break the request
+        logger.warning(
+            f"Email send failed to {_mask_email(to)}: {type(exc).__name__}"
+        )
         return False
 
 
@@ -117,7 +132,7 @@ async def send_password_reset_email(
         "We received a request to reset your PitchPilot password.\n\n"
         f"Choose a new password here (the link expires in {expires_minutes} minutes):\n"
         f"{link}\n\n"
-        "If you didn't request this, you can safely ignore this message — "
+        "If you didn't request this, you can safely ignore this message  -  "
         "your password will not change."
     )
     return await send_email(

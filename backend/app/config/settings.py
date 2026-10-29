@@ -32,7 +32,10 @@ class Settings(BaseSettings):
     # ── Security ──────────────────────────────────────────────────────
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
-    jwt_expires_minutes: int = 60 * 24 * 7  # one week
+    # 24h access token, revocable immediately by POST /auth/logout (which bumps
+    # the user's token_version). Prefer a refresh-token flow if longer sessions
+    # become a product requirement.
+    jwt_expires_minutes: int = 60 * 24
     # Password-reset links are single-use (the token carries the user's
     # token_version, which is bumped after a successful reset).
     password_reset_token_minutes: int = 30
@@ -69,7 +72,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     # ── Speech-to-text ────────────────────────────────────────────────
-    stt_provider: str = "auto"  # auto | azure | deepgram | openai | groq | mock
+    stt_provider: str = "auto"  # auto | azure | deepgram | openai | groq
     deepgram_api_key: str = ""
     openai_api_key: str = ""
     # Groq (OpenAI-compatible batch transcriptions, emulated near-real-time)
@@ -92,7 +95,9 @@ class Settings(BaseSettings):
     pacing_tick_seconds: float = 3.0
 
     # ── Script auditor (LLM) ──────────────────────────────────────────
-    llm_provider: str = "auto"  # auto | azure | openrouter | heuristic
+    # azure is the required primary: gpt-4o via Azure OpenAI. OpenRouter is a
+    # last-resort failover, never a silent model downgrade.
+    llm_provider: str = "auto"  # auto | azure | openrouter
     script_audit_word_interval: int = 45
     script_audit_min_gap_seconds: float = 30.0
     script_audit_context_words: int = 120
@@ -102,6 +107,15 @@ class Settings(BaseSettings):
     azure_openai_api_version: str = "2024-12-01-preview"
     openrouter_api_key: str = ""
     openrouter_model: str = "openai/gpt-4o-mini"
+
+    # ── Web search (Tavily) ───────────────────────────────────────────
+    # Grounds copilot suggestions/answers in current web facts. When the key
+    # is missing the copilot still answers from transcript/screen/outline, but
+    # a question flagged as factual gets an explicit "search unavailable"
+    # note instead of an invented figure.
+    tavily_api_key: str = ""
+    search_enabled: bool = True
+    search_max_results: int = 4
 
     # ── WebSocket resilience ──────────────────────────────────────────
     ws_reconnect_grace_seconds: float = 30.0
@@ -138,14 +152,14 @@ class Settings(BaseSettings):
     vision_client_enabled: bool = True
     vision_model: str = "gemini-3.5-flash"
     vision_fallback_model: str = "gemini-3.5-flash-lite"  # multimodal, higher free RPM
-    nvidia_api_key: str = ""          # NVIDIA NIM (build.nvidia.com) — vision fallback
+    nvidia_api_key: str = ""          # NVIDIA NIM (build.nvidia.com)  -  vision fallback
     nvidia_vision_model: str = "meta/llama-3.2-90b-vision-instruct"
     vision_interval_seconds: float = 2.0    # capture cadence
     vision_min_interval_calls: float = 20.0  # rate limit for actual API calls
     vision_change_similarity: float = 0.95  # aHash gate: only send changed screens
     vision_context_max_age_seconds: float = 60.0
 
-    # ── Agent prompts (all overridable via env — no hardcoded prompts) ─
+    # ── Agent prompts (all overridable via env  -  no hardcoded prompts) ─
     # VISION_PROMPT: generic screen description for the background worker.
     # VISION_ASK_PROMPT: used when the user asks about the screen; may contain
     #   a `{question}` placeholder which is replaced with the typed question.
@@ -154,15 +168,15 @@ class Settings(BaseSettings):
     vision_prompt: str = (
         "You are the screen analyst for a live AI copilot. Describe what is "
         "currently displayed on the presenter's screen in 25-40 words: name "
-        "the application or window title, then the visible content — slide "
-        "text, numbers, names, tables, charts, code or documents — that a "
+        "the application or window title, then the visible content  -  slide "
+        "text, numbers, names, tables, charts, code or documents  -  that a "
         "presenter would reference while speaking. Always include concrete "
         "on-screen details; never answer with one or two words. Plain text, "
         "no headings."
     )
     vision_ask_prompt: str = (
         "Answer the presenter's question using what is visible on their "
-        'screen. Question: "{question}" — describe only the on-screen facts '
+        'screen. Question: "{question}"  -  describe only the on-screen facts '
         "that matter for the answer (max 80 words)."
     )
     copilot_suggest_prompt: str = (
@@ -185,7 +199,7 @@ class Settings(BaseSettings):
         "DURING a live call. You get the live call transcript, an optional "
         "live description of the presenter's screen, and their pitch "
         "outline. Answer the presenter's question concretely, using the "
-        "screen description and transcript as your ground truth — quote "
+        "screen description and transcript as your ground truth  -  quote "
         "actual numbers/names/text visible on screen.\n"
         "Reply with ONLY a JSON object, no prose:\n"
         '{"text": "<your answer>"}\n'
@@ -218,14 +232,10 @@ class Settings(BaseSettings):
         "the numbers you were given. No markdown, no preamble."
     )
 
-    # ── Billing — PitchPilot Plus (Paystack) ──────────────────────────
-    # PAYMENTS_PROVIDER: auto | paystack | demo.
-    #   auto      → Paystack when PAYSTACK_SECRET_KEY is present, else demo.
-    #   demo      → instant upgrade (no real charge; MVP demos only).
-    # ALLOW_DEMO_BILLING is the explicit production opt-in for demo billing;
-    # without it, a production boot refuses demo/auto-without-key.
-    payments_provider: str = "auto"
-    allow_demo_billing: bool = False
+    # ── Billing  -  PitchPilot Plus (Paystack) ──────────────────────────
+    # Paystack is the only payment provider; there is no demo/free upgrade.
+    # A missing key makes checkout fail explicitly instead of granting Plus.
+    payments_provider: str = "paystack"
     paystack_secret_key: str = ""      # read from the workspace-root .env
     paystack_currency: str = "NGN"     # charge currency (NGN | USD | GHS …)
     plus_price_amount: int = 2250000   # minor units (kobo): 2250000 = ₦22,500
@@ -240,15 +250,39 @@ class Settings(BaseSettings):
     # wildcard/localhost CORS, localhost frontend or DB URLs).
     environment: str = "development"
 
-    # ── Abuse protection (in-process rate limiting) ───────────────────
+    # ── Abuse protection (shared Postgres-backed counters) ────────────
     rate_limit_enabled: bool = True
+    # "db" is required for multi-instance correctness; "memory" is for tests.
+    rate_limit_backend: str = "db"
     rate_limit_per_minute: int = 120        # general API budget per IP
     auth_rate_limit_per_minute: int = 12    # register/login per IP
+    # Per-account failed-login lockout (exponential: 60s, 120s, ... up to 1h).
+    login_max_failures: int = 5
+    login_failure_window_seconds: int = 3600
+    login_lockout_seconds: int = 60
+    login_lockout_max_seconds: int = 3600
+    # Per-user UTC-day paid-AI budgets (0 disables a budget).
+    daily_session_limit: int = 6
+    daily_ask_limit: int = 100
+    # Global live-session cap per API instance (resource/denial-of-wallet cap).
+    max_concurrent_sessions: int = 20
+    # Reject oversized HTTP JSON bodies before the endpoint parses them.
+    max_http_body_bytes: int = 1_000_000
 
-    # ── Short-lived WebSocket tickets (keeps JWTs out of URLs/logs) ───
-    ws_ticket_ttl_seconds: int = 900
+    # ── Short-lived, single-use WebSocket tickets ─────────────────────
+    ws_ticket_ttl_seconds: int = 60
 
-    # ── Email verification (opt-in — enable in production) ────────────
+    # ── Host header allowlist (TrustedHostMiddleware) ─────────────────
+    # JSON list in the environment. Include the public API host and any
+    # custom domain; localhost/testserver keep local development working.
+    allowed_hosts: list[str] = [
+        "pitchpilot-w7dj.onrender.com",
+        "localhost",
+        "127.0.0.1",
+        "testserver",
+    ]
+
+    # ── Email verification (opt-in  -  enable in production) ────────────
     require_email_verification: bool = False
     # EMAIL_PROVIDER: smtp (default) | resend (HTTP API; works on hosts that
     # block outbound SMTP, such as Render Free).
@@ -265,8 +299,10 @@ class Settings(BaseSettings):
     # True only when the API is reachable exclusively through a trusted
     # reverse proxy (Render, nginx). The limiter then uses the rightmost
     # X-Forwarded-For entry, which the nearest proxy appended. Never enable
-    # this if uvicorn itself is exposed to the public internet.
-    trust_proxy_headers: bool = False
+    # this if uvicorn itself is exposed to the public internet. Production
+    # deployments are expected to be behind Render/nginx, so the default is
+    # on; set TRUST_PROXY_HEADERS=false only for a directly exposed API.
+    trust_proxy_headers: bool = True
 
 
 def _is_placeholder(value: str) -> bool:
@@ -294,24 +330,49 @@ def production_config_issues(settings: "Settings") -> list[str]:
         issues.append(
             "JWT_SECRET_KEY must be a random value of at least 32 characters"
         )
+    if len(set(jwt_secret)) < 8:
+        issues.append(
+            "JWT_SECRET_KEY has insufficient entropy (use a randomly generated secret)"
+        )
+    if settings.jwt_expires_minutes > 60 * 24:
+        issues.append("JWT_EXPIRES_MINUTES must be <= 1440 (24 hours) in production")
+    if not settings.rate_limit_enabled:
+        issues.append("RATE_LIMIT_ENABLED must be true in production")
+    if settings.rate_limit_backend.strip().lower() != "db":
+        issues.append(
+            "RATE_LIMIT_BACKEND must be 'db' in production so limits are shared"
+        )
+    if not settings.trust_proxy_headers:
+        issues.append(
+            "TRUST_PROXY_HEADERS must be true when the API is behind Render/nginx"
+        )
+    if settings.ws_ticket_ttl_seconds > 300:
+        issues.append("WS_TICKET_TTL_SECONDS must be <= 300 in production")
+    if not settings.allowed_hosts or "*" in settings.allowed_hosts:
+        issues.append(
+            "ALLOWED_HOSTS must list the public API host(s); '*' is not allowed"
+        )
     if settings.auto_create_tables:
         issues.append("AUTO_CREATE_TABLES must be false in production (use Alembic)")
     provider = settings.payments_provider.strip().lower()
-    if provider == "demo" and not settings.allow_demo_billing:
+    if provider == "demo":
         issues.append(
-            "PAYMENTS_PROVIDER=demo requires ALLOW_DEMO_BILLING=true "
-            "(upgrades would otherwise be free)"
+            "PAYMENTS_PROVIDER=demo was removed; use PAYMENTS_PROVIDER=paystack"
         )
-    elif provider == "paystack" and _is_placeholder(settings.paystack_secret_key):
-        issues.append("PAYMENTS_PROVIDER=paystack needs PAYSTACK_SECRET_KEY")
-    elif (
-        provider == "auto"
-        and _is_placeholder(settings.paystack_secret_key)
-        and not settings.allow_demo_billing
+    elif _is_placeholder(settings.paystack_secret_key):
+        issues.append("PAYSTACK_SECRET_KEY is required")
+    if not (
+        settings.azure_openai_api_key.strip()
+        and settings.azure_openai_endpoint.strip()
     ):
         issues.append(
-            "PAYSTACK_SECRET_KEY is required in production, or set "
-            "ALLOW_DEMO_BILLING=true for an explicitly free demo"
+            "gpt-4o on Azure OpenAI is required: set AZURE_OPENAI_API_KEY and "
+            "AZURE_OPENAI_ENDPOINT"
+        )
+    if settings.search_enabled and not settings.tavily_api_key.strip():
+        issues.append(
+            "Live web search is enabled but TAVILY_API_KEY is missing "
+            "(set SEARCH_ENABLED=false to run without search)"
         )
     if any(origin.strip() == "*" for origin in settings.cors_origins):
         issues.append("CORS_ORIGINS must not contain '*'")
@@ -351,10 +412,7 @@ def production_config_issues(settings: "Settings") -> list[str]:
             issues.append("EMAIL_FROM still uses a placeholder domain")
     stt_choice = settings.stt_provider.strip().lower()
     if stt_choice == "mock":
-        issues.append(
-            "STT_PROVIDER=mock is not allowed in production "
-            "(transcripts would be simulated)"
-        )
+        issues.append("STT_PROVIDER=mock was removed; configure a live provider")
     elif stt_choice == "azure":
         missing = [
             name
@@ -374,7 +432,8 @@ def production_config_issues(settings: "Settings") -> list[str]:
     elif stt_choice == "groq" and _is_placeholder(settings.groq_api_key):
         issues.append("STT_PROVIDER=groq needs GROQ_API_KEY")
     elif stt_choice == "auto" and not (
-        not _is_placeholder(settings.deepgram_api_key)
+        not _is_placeholder(settings.groq_api_key)
+        or not _is_placeholder(settings.deepgram_api_key)
         or (
             not _is_placeholder(settings.azure_openai_api_key)
             and not _is_placeholder(settings.azure_openai_endpoint)
@@ -385,7 +444,7 @@ def production_config_issues(settings: "Settings") -> list[str]:
     ):
         issues.append(
             "No speech-to-text provider configured in production "
-            "(STT_PROVIDER=auto would fall back to the mock demo speaker)"
+            "(live transcription needs one of those keys)"
         )
     return issues
 

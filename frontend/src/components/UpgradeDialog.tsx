@@ -1,8 +1,8 @@
 /**
  * UpgradeDialog — PitchPilot Plus paywall.
  *
- * Paystack mode redirects to the hosted checkout page; demo mode (no key
- * configured) upgrades instantly so the whole flow is testable end-to-end.
+ * Checkout always goes through the hosted payment page; there is no free
+ * or demo upgrade path.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -26,8 +26,7 @@ interface UpgradeDialogProps {
   priceDisplay: string;
   freeSessions: number;
   freeScripts: number;
-  paymentsLive: boolean;
-  /** Called after a demo-mode upgrade succeeds. */
+  /** Called after the plan state changes (e.g. an existing payment applied). */
   onUpgraded: () => void;
 }
 
@@ -45,19 +44,16 @@ export function UpgradeDialog({
   priceDisplay,
   freeSessions,
   freeScripts,
-  paymentsLive,
   onUpgraded,
 }: UpgradeDialogProps): JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [demoActivated, setDemoActivated] = useState(false);
   const [alreadyPlus, setAlreadyPlus] = useState(false);
 
   useEffect((): void => {
     if (!open) {
       setError(null);
       setBusy(false);
-      setDemoActivated(false);
       setAlreadyPlus(false);
     }
   }, [open]);
@@ -108,9 +104,9 @@ export function UpgradeDialog({
         onUpgraded();
         return;
       }
-      // Demo mode: upgraded instantly.
-      setDemoActivated(true);
-      onUpgraded();
+      // The provider returned neither a checkout URL nor an active plan:
+      // never pretend the upgrade happened.
+      setError("Checkout did not open. Please try again.");
     } catch (err) {
       checkoutWindow?.close();
       setError(
@@ -150,21 +146,17 @@ export function UpgradeDialog({
           </div>
 
           <div className="max-h-[calc(86vh-6rem)] overflow-y-auto px-6 py-5">
-            {demoActivated || alreadyPlus ? (
+            {alreadyPlus ? (
               <div className="flex flex-col items-center gap-3 py-6 text-center">
                 <span className="relative rounded-2xl bg-amber-500/10 p-4 text-amber-400">
                   <span className="absolute inset-0 animate-ping-soft rounded-2xl bg-amber-400/20" />
                   <Sparkles size={26} />
                 </span>
                 <p className="text-sm font-semibold text-slate-100">
-                  {alreadyPlus
-                    ? "You're already on Plus — unlimited everything."
-                    : "You're on Plus — unlimited everything."}
+                  You're already on Plus - unlimited everything.
                 </p>
                 <p className="text-xs text-slate-500">
-                  {alreadyPlus
-                    ? "Your subscription is active — no new charge was made."
-                    : "No charge was made — enjoy Plus."}
+                  Your subscription is active - no new charge was made.
                 </p>
                 <Dialog.Close asChild>
                   <button type="button" className="btn-primary mt-2">
@@ -206,12 +198,6 @@ export function UpgradeDialog({
                   ))}
                 </ul>
 
-                {!paymentsLive && (
-                  <p className="mt-4 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-[11px] text-slate-400">
-                    No card required — your plan upgrades instantly.
-                  </p>
-                )}
-
                 {error !== null && (
                   <p className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
                     {error}
@@ -228,9 +214,7 @@ export function UpgradeDialog({
                   ) : (
                     <CreditCard size={16} />
                   )}
-                  {paymentsLive
-                    ? `Upgrade to Plus — ${priceDisplay}/mo`
-                    : `Activate Plus — ${priceDisplay}/mo`}
+                  {`Upgrade to Plus - ${priceDisplay}/mo`}
                 </button>
                 <p className="mt-2.5 text-center text-[11px] text-slate-600">
                   Secure checkout · cancel anytime

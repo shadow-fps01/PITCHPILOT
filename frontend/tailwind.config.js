@@ -1,4 +1,4 @@
-/** @type {import('tailwindcss').Config} */
+﻿/** @type {import('tailwindcss').Config} */
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
@@ -23,44 +23,47 @@ export default {
         ],
       },
       colors: {
-        // Deep-space base surfaces (used by the app shell + overlay).
+        // Black base surfaces (used by the app shell + overlay).
         ink: {
-          950: "#04060f",
-          900: "#070b18",
-          850: "#0a1020",
-          800: "#0e1526",
-          700: "#141d33",
+          950: "#06050a",
+          900: "#0a090f",
+          850: "#0f0d15",
+          800: "#15121b",
+          700: "#1d1925",
         },
+        // Warm gold accent ramp: champagne -> gold -> bronze.
         brand: {
-          50: "#ecfeff",
-          100: "#cffafe",
-          200: "#a5f3fc",
-          300: "#67e8f9",
-          400: "#38bdf8",
-          500: "#0ea5e9",
-          600: "#4f46e5",
-          700: "#7c3aed",
-          800: "#a855f7",
-          900: "#c026d3",
+          50: "#fffbeb",
+          100: "#fef3c7",
+          200: "#fde68a",
+          300: "#fcd34d",
+          400: "#fbbf24",
+          500: "#f59e0b",
+          600: "#d97706",
+          700: "#b45309",
+          800: "#92400e",
+          900: "#78350f",
         },
       },
       backgroundImage: {
         "gradient-brand":
-          "linear-gradient(120deg, #38bdf8 0%, #6366f1 48%, #a855f7 100%)",
+          "linear-gradient(120deg, #fde68a 0%, #fbbf24 46%, #d97706 100%)",
         "gradient-brand-soft":
-          "linear-gradient(120deg, rgba(56,189,248,0.16) 0%, rgba(99,102,241,0.16) 48%, rgba(168,85,247,0.16) 100%)",
+          "linear-gradient(120deg, rgba(253,230,138,0.16) 0%, rgba(251,191,36,0.16) 46%, rgba(217,119,6,0.16) 100%)",
         "gradient-copilot":
-          "linear-gradient(120deg, rgba(56,189,248,0.14), rgba(168,85,247,0.14))",
+          "linear-gradient(120deg, rgba(253,230,138,0.14), rgba(245,158,11,0.14))",
         "gradient-gold": "linear-gradient(120deg, #fcd34d 0%, #f59e0b 100%)",
         "gradient-sheen":
           "linear-gradient(110deg, transparent 25%, rgba(255,255,255,0.28) 50%, transparent 75%)",
       },
       boxShadow: {
-        glow: "0 10px 44px -14px rgba(56,189,248,0.55)",
-        "glow-violet": "0 10px 44px -14px rgba(168,85,247,0.55)",
-        "glow-gold": "0 10px 44px -14px rgba(251,191,36,0.5)",
-        panel: "0 24px 70px -30px rgba(0,0,0,0.9)",
-        "inner-top": "inset 0 1px 0 0 rgba(255,255,255,0.06)",
+        glow: "0 10px 44px -14px rgba(251,191,36,0.55)",
+        "glow-teal": "0 10px 44px -14px rgba(253,230,138,0.45)",
+        "glow-gold": "0 10px 44px -14px rgba(245,158,11,0.5)",
+        panel: "0 24px 70px -30px rgba(0,0,0,0.95)",
+        "inner-top": "inset 0 1px 0 0 rgba(255,255,255,0.08)",
+        raised:
+          "0 1px 0 0 rgba(255,255,255,0.08), 0 18px 40px -24px rgba(0,0,0,0.95)",
       },
       keyframes: {
         "aurora-a": {

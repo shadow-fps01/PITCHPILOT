@@ -19,7 +19,7 @@ type GaugeZone = "idle" | "slow" | "good" | "fast" | "very-fast";
 
 const ZONE: Record<GaugeZone, { color: string; label: string; text: string }> = {
   idle: { color: "#64748b", label: "warming up", text: "text-slate-400" },
-  slow: { color: "#38bdf8", label: "ease in", text: "text-sky-300" },
+  slow: { color: "#fbbf24", label: "ease in", text: "text-amber-300" },
   good: { color: "#34d399", label: "on pace", text: "text-emerald-300" },
   fast: { color: "#fbbf24", label: "a touch fast", text: "text-amber-300" },
   "very-fast": { color: "#fb7185", label: "slow down", text: "text-rose-300" },
@@ -61,9 +61,9 @@ export function WpmGauge({ wpm, target, className }: WpmGaugeProps): JSX.Element
       <svg viewBox="0 0 120 66" className="w-full overflow-visible">
         <defs>
           <linearGradient id="wpm-grad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#38bdf8" />
+            <stop offset="0%" stopColor="#fbbf24" />
             <stop offset="55%" stopColor={color} />
-            <stop offset="100%" stopColor="#a855f7" />
+            <stop offset="100%" stopColor="#fbbf24" />
           </linearGradient>
         </defs>
 

@@ -25,12 +25,13 @@ from app.schemas.stream import (
     TranscriptMessage,
 )
 from app.services.audio_processor import TranscriptAnalytics
-from app.services.llm_client import LLMClient, ScriptAuditRequest
+from app.services.llm_client import AIUnavailable, LLMClient, ScriptAuditRequest
 from app.models.session_event import EventType
 
 PACING_CUE_COOLDOWN_SECONDS = 15.0
 FILLER_CUE_COOLDOWN_SECONDS = 18.0
 MIN_WINDOW_WORDS_FOR_PACING = 12
+AUDIT_OFFLINE_BACKOFF_SECONDS = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,11 +53,11 @@ class CoachProfile:
 
 
 COACH_PROFILES: dict[str, CoachProfile] = {
-    # Fewer, higher-confidence cues — for a calm, low-interruption coach.
+    # Fewer, higher-confidence cues  -  for a calm, low-interruption coach.
     "calm": CoachProfile("calm", 5, 16, 1.55, 45, 55, 26.0, 34.0),
     # The shipped default.
     "balanced": CoachProfile("balanced", 3, 12, 1.35, 25, 30, 15.0, 18.0),
-    # More cues, tighter thresholds — for practice / drilling.
+    # More cues, tighter thresholds  -  for practice / drilling.
     "coach": CoachProfile("coach", 2, 9, 1.20, 15, 22, 10.0, 12.0),
 }
 DEFAULT_COACH_PROFILE = "balanced"
@@ -111,6 +112,7 @@ class AICoach:
         self._audit_lock = asyncio.Lock()
         self._audit_task: asyncio.Task[None] | None = None
         self._anticipation_task: asyncio.Task[None] | None = None
+        self._audit_offline = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────
     def apply_profile(self, name: str) -> None:
@@ -136,7 +138,7 @@ class AICoach:
         """Process one STT chunk; returns transcript/metrics messages.
 
         Cues (pacing, filler) are delivered via the `on_cue` callback so that
-        every cue — regardless of origin — is persisted and emitted by a
+        every cue  -  regardless of origin  -  is persisted and emitted by a
         single code path in the WebSocket handler.
         """
         self.start_clock()
@@ -178,7 +180,7 @@ class AICoach:
             return
         try:
             await self.on_cue(cue)
-        except Exception as exc:  # noqa: BLE001 — cues must never break the stream
+        except Exception as exc:  # noqa: BLE001  -  cues must never break the stream
             logger.warning(f"on_cue callback failed: {exc}")
 
     def _maybe_schedule_anticipation(self) -> None:
@@ -241,7 +243,7 @@ class AICoach:
             cue_type=EventType.FILLER_WORD,
             message=(
                 f'You have said "{word}"-style fillers {burst} times in the last '
-                f"{int(self._settings.filler_burst_window_seconds)}s — try a short pause instead."
+                f"{int(self._settings.filler_burst_window_seconds)}s  -  try a short pause instead."
             ),
             severity="warn",
             raw_transcript_snippet=self.analytics.context_text(12),
@@ -261,19 +263,19 @@ class AICoach:
         if wpm > self._target_wpm * self.profile.fast_multiplier:
             cue = CueMessage(
                 cue_type=EventType.PACING_ALERT,
-                message=f"Slow down — you are at {wpm:.0f} WPM (target {self._target_wpm}).",
+                message=f"Slow down  -  you are at {wpm:.0f} WPM (target {self._target_wpm}).",
                 severity="alert",
             )
         elif wpm > self._target_wpm + self.profile.warn_delta:
             cue = CueMessage(
                 cue_type=EventType.PACING_ALERT,
-                message=f"Ease off the pace a little — {wpm:.0f} WPM.",
+                message=f"Ease off the pace a little  -  {wpm:.0f} WPM.",
                 severity="warn",
             )
         elif wpm < self._target_wpm - self.profile.slow_delta:
             cue = CueMessage(
                 cue_type=EventType.PACING_ALERT,
-                message=f"Pick up the pace — {wpm:.0f} WPM (target {self._target_wpm}).",
+                message=f"Pick up the pace  -  {wpm:.0f} WPM (target {self._target_wpm}).",
                 severity="info",
             )
         if cue is not None:
@@ -314,9 +316,28 @@ class AICoach:
             )
             try:
                 result = await self._llm.audit_transcript(request)
-            except Exception as exc:  # noqa: BLE001 — audits must never kill the stream
+            except AIUnavailable as exc:
+                # No silent fallback: tell the connection the script audit is
+                # offline once, then back off instead of hammering the API.
+                logger.warning(f"Script audit unavailable: {exc}")
+                if not self._audit_offline:
+                    self._audit_offline = True
+                    await self._emit_cue(
+                        CueMessage(
+                            cue_type=EventType.SCRIPT_MISS,
+                            message=(
+                                "Script coaching is offline right now  -  your "
+                                "pacing and filler cues are still live."
+                            ),
+                            severity="warn",
+                        )
+                    )
+                self._last_audit_t = t + AUDIT_OFFLINE_BACKOFF_SECONDS
+                return
+            except Exception as exc:  # noqa: BLE001  -  audits must never kill the stream
                 logger.warning(f"Script audit raised: {exc}")
                 return
+            self._audit_offline = False
             if not result.missed or not result.cue:
                 return
             self._covered.update(result.covered)

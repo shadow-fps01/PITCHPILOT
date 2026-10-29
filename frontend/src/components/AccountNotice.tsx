@@ -4,7 +4,7 @@
  * address still needs confirming. Rendered above every non-live screen.
  */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Loader2, MailWarning, X } from "lucide-react";
 
 import { useApp } from "@/context/AppContext";
@@ -17,29 +17,9 @@ export function AccountNotice(): JSX.Element | null {
   const { view } = useApp();
   const { user, notice, dismissNotice } = useAuth();
   const [resendState, setResendState] = useState<ResendState>("idle");
-  const [emailAvailable, setEmailAvailable] = useState<boolean | null>(null);
 
   const needsVerification = user !== null && !user.email_verified;
-
-  useEffect(() => {
-    if (!needsVerification) return;
-    let cancelled = false;
-    authApi
-      .emailAvailability()
-      .then((result) => {
-        if (!cancelled) setEmailAvailable(result.available);
-      })
-      .catch(() => {
-        if (!cancelled) setEmailAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [needsVerification]);
-
-  // Don't ask someone to confirm an address when this deployment can't send
-  // the confirmation email yet. Verification results (notice) still show.
-  const showVerificationReminder = needsVerification && emailAvailable === true;
+  const showVerificationReminder = needsVerification;
   if (view === "live" || (notice === null && !showVerificationReminder)) return null;
 
   const resend = async (): Promise<void> => {

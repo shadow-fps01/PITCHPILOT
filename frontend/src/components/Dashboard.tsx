@@ -81,7 +81,6 @@ function parseKeywords(text: string): string[] {
 /** Friendly label for a payment source (avoids leaking internal names). */
 function providerLabel(provider: string): string {
   if (provider === "paystack") return "Card";
-  if (provider === "demo") return "Included";
   return "Payment";
 }
 
@@ -399,7 +398,7 @@ export function Dashboard(): JSX.Element {
     [loadScripts, selectedScriptId],
   );
 
-  /** Cancel the Plus subscription (Paystack: at period end; demo: now). */
+  /** Cancel the Plus subscription at the payment provider (at period end). */
   const cancelPlus = useCallback(async (): Promise<void> => {
     if (cancelBusy) return;
     if (
@@ -773,7 +772,7 @@ export function Dashboard(): JSX.Element {
                       <button
                         onClick={() => openEditScriptDialog(script)}
                         title="Edit"
-                        className="rounded-lg border border-white/10 p-2 text-slate-400 transition-colors hover:border-sky-400/50 hover:text-sky-300"
+                        className="rounded-lg border border-white/10 p-2 text-slate-400 transition-colors hover:border-amber-400/50 hover:text-amber-300"
                       >
                         <Pencil size={13} />
                       </button>
@@ -822,7 +821,7 @@ export function Dashboard(): JSX.Element {
                     key={session.id}
                     className={cn(
                       "overflow-hidden rounded-2xl border bg-white/[0.03] backdrop-blur-xl transition-colors",
-                      isExpanded ? "border-sky-400/30" : "border-white/[0.08] hover:border-white/20",
+                      isExpanded ? "border-amber-400/30" : "border-white/[0.08] hover:border-white/20",
                     )}
                   >
                     <button
@@ -925,7 +924,7 @@ export function Dashboard(): JSX.Element {
                                     key={event.id}
                                     className="flex items-start gap-2.5 rounded-xl bg-white/[0.03] px-3 py-2 text-xs"
                                   >
-                                    <span className="shrink-0 pt-0.5 font-mono text-[10px] text-sky-300/80">
+                                    <span className="shrink-0 pt-0.5 font-mono text-[10px] text-amber-300/80">
                                       {formatDuration(event.timestamp)}
                                     </span>
                                     <span className="text-slate-300">
@@ -1085,9 +1084,7 @@ export function Dashboard(): JSX.Element {
                   </button>
                 )}
                 <p className="mt-2.5 text-center text-[11px] text-slate-600">
-                  {billing.provider === "paystack"
-                    ? "Secure checkout · cancel anytime"
-                    : "No card required"}
+                  Secure checkout - cancel anytime
                 </p>
               </section>
             </div>
@@ -1183,7 +1180,7 @@ export function Dashboard(): JSX.Element {
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <span className="field-label !mb-0">Target pace</span>
-                  <span className="text-xs font-semibold tabular-nums text-sky-300">
+                  <span className="text-xs font-semibold tabular-nums text-amber-300">
                     {form.targetWpm} WPM
                   </span>
                 </div>
@@ -1198,7 +1195,7 @@ export function Dashboard(): JSX.Element {
                   <Slider.Track className="relative h-1.5 w-full grow rounded-full bg-white/10">
                     <Slider.Range className="absolute h-full rounded-full bg-gradient-brand" />
                   </Slider.Track>
-                  <Slider.Thumb className="block h-4 w-4 rounded-full border-2 border-white bg-sky-500 shadow-glow transition-transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-sky-500/30" />
+                  <Slider.Thumb className="block h-4 w-4 rounded-full border-2 border-white bg-amber-500 shadow-glow transition-transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-amber-500/30" />
                 </Slider.Root>
               </div>
 
@@ -1242,7 +1239,6 @@ export function Dashboard(): JSX.Element {
         priceDisplay={billing?.price_display ?? "₦22,500"}
         freeSessions={billing?.free_monthly_sessions ?? 3}
         freeScripts={billing?.free_monthly_scripts ?? 3}
-        paymentsLive={billing?.payments_live ?? false}
         onUpgraded={afterPlanChange}
       />
     </div>

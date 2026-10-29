@@ -49,6 +49,7 @@ from app.schemas.stream import (
     ContextCardMessage,
     CopilotDeltaMessage,
     CopilotMessage,
+    CopilotSource,
     CueMessage,
     DebriefMessage,
     ErrorMessage,
@@ -63,9 +64,10 @@ from app.schemas.stream import (
 from app.services.anticipation import SurfacedCard
 from app.services.capture import NativeCaptureService, capture_available
 from app.services.copilot_chat import CopilotInsight
-from app.services.debrief import generate_debrief, heuristic_debrief
+from app.services.debrief import generate_debrief
 from app.services.session_registry import registry
-from app.services.stt import TranscriptChunk, build_stt_provider
+from app.services.rate_limit import consume_daily_budget
+from app.services.stt import STTUnavailable, TranscriptChunk, build_stt_provider
 from app.services.vision import (
     ScreenVisionWorker,
     shared_worker,
@@ -83,6 +85,10 @@ _WS_BAD_REQUEST = 4400
 _WS_ALREADY_ENDED = 4410
 
 MAX_QUEUE_SIZE = 500
+MAX_SESSION_SECONDS = 90 * 60
+MAX_CONCURRENT_SESSIONS_PER_USER = 2
+ASK_MIN_INTERVAL_SECONDS = 3.0
+MAX_ASKS_PER_SESSION = 20
 
 _AUDIO_MAGIC = b"PPA1"
 _AUDIO_PRESENTER = 1
@@ -192,19 +198,25 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         try:
             await websocket.send_text(ErrorMessage(message=message).model_dump_json())
             await websocket.close(code=code)
-        except Exception:  # noqa: BLE001 — client may already be gone
+        except Exception:  # noqa: BLE001  -  client may already be gone
             pass
         logger.info(f"Stream rejected ({code}): {message}")
 
-    # ── Handshake: ticket → user → session ────────────────────────────
+    # ── Handshake: session id → single-use ticket → user ───────────────
+    try:
+        sid = uuid.UUID(session_id)
+    except ValueError:
+        await reject("Invalid session id", _WS_BAD_REQUEST)
+        return
+
     ticket = websocket.query_params.get("ticket", "")
     if not ticket:
         await reject("Missing connection ticket", _WS_UNAUTHORIZED)
         return
-    ticket_user_id = ws_tickets.resolve(ticket)
+    ticket_user_id = await ws_tickets.resolve(ticket, sid)
     if ticket_user_id is None:
         await reject(
-            "This connection link has expired — please reconnect",
+            "This connection link has expired  -  please reconnect",
             _WS_UNAUTHORIZED,
         )
         return
@@ -212,12 +224,6 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         user_id = uuid.UUID(ticket_user_id)
     except ValueError:
         await reject("Invalid connection ticket", _WS_UNAUTHORIZED)
-        return
-
-    try:
-        sid = uuid.UUID(session_id)
-    except ValueError:
-        await reject("Invalid session id", _WS_BAD_REQUEST)
         return
 
     try:
@@ -248,9 +254,34 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
             script: Script | None = None
             if session.script_id is not None:
                 script = await db.scalar(select(Script).where(Script.id == session.script_id))
-    except Exception as exc:  # noqa: BLE001 — DB issues must not hang the socket
+    except Exception as exc:  # noqa: BLE001  -  DB issues must not hang the socket
         logger.warning(f"Stream handshake DB failure: {exc}")
         await reject("Could not load the session", 5000)
+        return
+
+    # Allow reconnects to an existing live session, but cap how many distinct
+    # sessions one account can keep billable at once.
+    if (
+        registry.get(sid) is None
+        and registry.active_for_user(user_id) >= MAX_CONCURRENT_SESSIONS_PER_USER
+    ):
+        await reject(
+            "You already have the maximum number of live sessions open. "
+            "Close one before starting another.",
+            _WS_FORBIDDEN,
+        )
+        return
+
+    # Global cap protects the shared provider budget/worker from a burst of
+    # new sessions. Reconnects to an existing live session are still allowed.
+    if (
+        registry.get(sid) is None
+        and registry.active_count() >= settings.max_concurrent_sessions
+    ):
+        await reject(
+            "PitchPilot is at capacity right now. Please try again in a moment.",
+            1013,
+        )
         return
 
     state, created = registry.get_or_create(session, script)
@@ -293,6 +324,10 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 trigger=insight.trigger,
                 reply_to=insight.reply_to,
                 screen_used=insight.screen_used,
+                sources=[
+                    CopilotSource(title=title, url=url)
+                    for title, url in insight.sources
+                ],
             )
         )
 
@@ -310,8 +345,11 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
             emit(
                 CopilotMessage(
                     id=uuid.uuid4().hex,
-                    kind="status",
-                    text="The copilot is unavailable right now.",
+                    kind="error",
+                    text=(
+                        "The suggestion service is unavailable right now. "
+                        "Retry in a moment."
+                    ),
                     reply_to=message.id,
                 )
             )
@@ -319,6 +357,49 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         question = message.text.strip()
         if not question:
             return
+        now = time.monotonic()
+        if now - state.last_ask_at < ASK_MIN_INTERVAL_SECONDS:
+            emit(
+                CopilotMessage(
+                    id=uuid.uuid4().hex,
+                    kind="error",
+                    text="Please wait a moment before asking another question.",
+                    reply_to=message.id,
+                )
+            )
+            return
+        if state.ask_count >= MAX_ASKS_PER_SESSION:
+            emit(
+                CopilotMessage(
+                    id=uuid.uuid4().hex,
+                    kind="error",
+                    text=(
+                        f"Ask limit reached for this session "
+                        f"({MAX_ASKS_PER_SESSION} questions). Start a new session "
+                        "to continue."
+                    ),
+                    reply_to=message.id,
+                )
+            )
+            return
+        budget = await consume_daily_budget(
+            "asks", user_id, settings.daily_ask_limit
+        )
+        if not budget.allowed:
+            emit(
+                CopilotMessage(
+                    id=uuid.uuid4().hex,
+                    kind="error",
+                    text=(
+                        "Daily copilot question limit reached. "
+                        "Please try again tomorrow."
+                    ),
+                    reply_to=message.id,
+                )
+            )
+            return
+        state.last_ask_at = now
+        state.ask_count += 1
         logger.info(f"Copilot question received on session {sid} ({len(question)} chars)")
         asyncio.create_task(state.copilot.ask(question, message.id))
 
@@ -375,7 +456,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 CopilotMessage(
                     id=uuid.uuid4().hex,
                     kind="status",
-                    text="Screen vision on — I can see what you share now.",
+                    text="Screen vision on  -  I can see what you share now.",
                 )
             )
         else:
@@ -392,7 +473,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 CopilotMessage(
                     id=uuid.uuid4().hex,
                     kind="status",
-                    text="Screen vision off — I'll rely on the call audio only.",
+                    text="Screen vision off  -  I'll rely on the call audio only.",
                 )
             )
         emit(status_message())
@@ -441,7 +522,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
 
     def on_capture_frame(pcm: bytes) -> None:
         """Thread → loop: hand a mixed PCM frame to the STT provider."""
-        if capture_in_flight["count"] > 8:  # STT wedged — shed, don't pile up
+        if capture_in_flight["count"] > 8:  # STT wedged  -  shed, don't pile up
             return
         capture_in_flight["count"] += 1
 
@@ -466,7 +547,8 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
             ),
             vision_active=vision_is_active(),
             anticipation_active=state.anticipation is not None,
-            copilot_active=state.copilot is not None,
+            copilot_active=state.copilot is not None and state.copilot.available,
+            search_active=settings.search_enabled and bool(settings.tavily_api_key.strip()),
         )
 
     async def start_capture() -> None:
@@ -520,7 +602,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         if chunk.is_final and state.copilot is not None:
             try:
                 state.copilot.feed_final(chunk.text, speaker="presenter")
-            except Exception as exc:  # noqa: BLE001 — copilot must never break audio
+            except Exception as exc:  # noqa: BLE001  -  copilot must never break audio
                 logger.warning(f"Copilot feed failure on session {sid}: {exc}")
 
     async def on_system_transcript(chunk: TranscriptChunk) -> None:
@@ -535,11 +617,11 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         if state.copilot is not None:
             try:
                 state.copilot.feed_final(chunk.text, speaker="other")
-            except Exception as exc:  # noqa: BLE001 — copilot must never break audio
+            except Exception as exc:  # noqa: BLE001  -  copilot must never break audio
                 logger.warning(f"Copilot system feed failure on session {sid}: {exc}")
         try:
             state.coach.feed_external_transcript(chunk.text)
-        except Exception as exc:  # noqa: BLE001 — anticipation is best-effort
+        except Exception as exc:  # noqa: BLE001  -  anticipation is best-effort
             logger.warning(f"Anticipation system feed failed on session {sid}: {exc}")
 
     system_provider = None
@@ -556,8 +638,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
             return system_provider
         if system_provider_disabled:
             return None
-        if provider_name == "mock":
-            # Never create a second simulated speaker in demo mode.
+        if provider_name == "none":
             system_provider_disabled = True
             return None
         try:
@@ -575,7 +656,11 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         )
         return candidate
 
-    provider, provider_name = build_stt_provider(on_transcript)
+    try:
+        provider, provider_name = build_stt_provider(on_transcript)
+    except STTUnavailable as exc:
+        await reject(f"Transcription unavailable: {exc}", 1011)
+        return
     emit(SessionStartedMessage(session_id=sid, started_at=state.started_at))
 
     emit(status_message())
@@ -593,7 +678,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                 continue
             try:
                 await websocket.send_text(message.model_dump_json())
-            except Exception:  # noqa: BLE001 — socket died; stop pumping
+            except Exception:  # noqa: BLE001  -  socket died; stop pumping
                 break
 
     async def ticker_loop() -> None:
@@ -622,6 +707,30 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         f"({'reconnected' if resumed else 'new'} connection #{state.connect_count})"
     )
 
+    # Hard wall-clock cap: a live session must not stay billable forever.
+    session_expired = {"value": False}
+
+    async def session_watchdog() -> None:
+        remaining = MAX_SESSION_SECONDS - (time.time() - state.started_at.timestamp())
+        if remaining > 0:
+            await asyncio.sleep(remaining)
+        session_expired["value"] = True
+        emit(
+            ErrorMessage(
+                message=(
+                    f"This session has reached the {MAX_SESSION_SECONDS // 60}-minute "
+                    "limit. Start a new session to continue."
+                )
+            )
+        )
+        try:
+            await asyncio.sleep(0.5)  # give the sender a chance to flush the error
+            await websocket.close(code=1000, reason="Session time limit reached")
+        except Exception:  # noqa: BLE001  -  socket may already be gone
+            pass
+
+    watchdog_task = asyncio.create_task(session_watchdog())
+
     # ── Receive loop ─────────────────────────────────────────────────
     ended_gracefully = False
     try:
@@ -639,7 +748,7 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                     if other is not None:
                         try:
                             await other.send_audio(pcm)
-                        except Exception as exc:  # noqa: BLE001 — keep the mic stream alive
+                        except Exception as exc:  # noqa: BLE001  -  keep the mic stream alive
                             logger.warning(
                                 f"Other-party STT send failed on session {sid}: {exc}"
                             )
@@ -680,6 +789,9 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Stream receive error on {sid}: {exc}")
 
+    if session_expired["value"]:
+        ended_gracefully = True
+
     # ── Teardown ─────────────────────────────────────────────────────
     if capture_service is not None:
         capture_service.stop()
@@ -687,11 +799,15 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
     if system_provider is not None:
         try:
             await system_provider.stop()
-        except Exception as exc:  # noqa: BLE001 — teardown must continue
+        except Exception as exc:  # noqa: BLE001  -  teardown must continue
             logger.warning(f"Other-party STT stop failed on {sid}: {exc}")
         system_provider = None
-    await provider.stop()
     ticker_task.cancel()
+    watchdog_task.cancel()
+    try:
+        await provider.stop()
+    except Exception as exc:  # noqa: BLE001  -  teardown must continue
+        logger.warning(f"STT stop failed on {sid}: {exc}")
 
     if ended_gracefully:
         summary = await registry.finalize(sid)
@@ -702,9 +818,11 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                     summary=summary,
                 )
             )
-            # Post-session debrief — bounded so a slow LLM never blocks close.
+            # A generated review is a nice-to-have. If the AI service is down,
+            # send the plain measured stats instead of invented advice.
+            review = None
             try:
-                debrief = await asyncio.wait_for(
+                review = await asyncio.wait_for(
                     generate_debrief(
                         settings,
                         summary=summary,
@@ -715,16 +833,31 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
                     ),
                     timeout=9.0,
                 )
-            except Exception as exc:  # noqa: BLE001 — timeout or generation error
+            except Exception as exc:  # noqa: BLE001  -  timeout or generation error
                 logger.warning(f"Debrief generation failed on {sid}: {exc}")
-                debrief = heuristic_debrief(summary, state.coach.target_wpm)
-            emit(
-                DebriefMessage(
-                    summary=debrief.summary,
-                    tips=debrief.tips,
-                    source=debrief.source,
+            if review is not None and review.source == "ai":
+                emit(
+                    DebriefMessage(
+                        summary=review.summary,
+                        tips=review.tips,
+                        source=review.source,
+                    )
                 )
-            )
+            else:
+                emit(
+                    DebriefMessage(
+                        summary=(
+                            f"{summary.duration_seconds or 0}s of speaking, "
+                            f"{summary.total_filler_words} filler words, "
+                            f"{summary.pacing_alerts} pacing alerts, "
+                            f"{summary.script_misses} outline points missed. "
+                            "A written review appears when the coaching service "
+                            "is available."
+                        ),
+                        tips=[],
+                        source="unavailable",
+                    )
+                )
         drain.set()
         try:
             await asyncio.wait_for(sender_task, timeout=3.0)
@@ -740,6 +873,6 @@ async def stream_endpoint(websocket: WebSocket, session_id: str) -> None:
         sender_task.cancel()
         registry.schedule_finalize(sid)
         logger.info(
-            f"Session {sid} socket dropped — holding state for "
+            f"Session {sid} socket dropped  -  holding state for "
             f"{settings.ws_reconnect_grace_seconds:.0f}s for a reconnect"
         )

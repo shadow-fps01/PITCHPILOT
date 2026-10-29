@@ -26,9 +26,9 @@ const TONE: Record<AnalyticsTone, { badge: string; value: string; glow: string }
     glow: "hover:shadow-[0_10px_40px_-18px_rgba(148,163,184,0.6)]",
   },
   info: {
-    badge: "bg-sky-400/15 text-sky-300",
-    value: "text-sky-200",
-    glow: "hover:shadow-[0_10px_40px_-16px_rgba(56,189,248,0.6)]",
+    badge: "bg-amber-400/15 text-amber-300",
+    value: "text-amber-200",
+    glow: "hover:shadow-[0_10px_40px_-16px_rgba(251,191,36,0.6)]",
   },
   success: {
     badge: "bg-emerald-400/15 text-emerald-300",

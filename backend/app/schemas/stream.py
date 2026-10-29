@@ -75,6 +75,7 @@ class SessionStatusMessage(BaseModel):
     vision_active: bool = False
     anticipation_active: bool = False
     copilot_active: bool = False
+    search_active: bool = False
 
 
 class CaptureStatusMessage(BaseModel):
@@ -104,15 +105,25 @@ class CopilotMessage(BaseModel):
     `kind="suggestion"`  → proactive ready-to-speak suggestion (call + screen aware)
     `kind="answer"`      → reply to a user question asked from the dialogue box
     `kind="status"`      → transient copilot status note (e.g. screen on/off)
+    `kind="error"`       → the AI/search service failed; the UI offers a retry
     """
 
     type: Literal["copilot"] = "copilot"
     id: str
-    kind: Literal["suggestion", "answer", "status"] = "suggestion"
+    kind: Literal["suggestion", "answer", "status", "error"] = "suggestion"
     text: str
     trigger: str | None = None
     reply_to: str | None = None
     screen_used: bool = False
+    # (title, url) pairs backing the answer with live web search results.
+    sources: list["CopilotSource"] = Field(default_factory=list)
+
+
+class CopilotSource(BaseModel):
+    """One web source the copilot used for a suggestion/answer."""
+
+    title: str
+    url: str
 
 
 class CopilotDeltaMessage(BaseModel):
@@ -188,8 +199,8 @@ class ClientAsk(BaseModel):
     """A question typed into the copilot dialogue box (Cluely-style)."""
 
     type: Literal["ask"] = "ask"
-    id: str
-    text: str
+    id: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=500)
 
 
 class ScreenCommand(BaseModel):

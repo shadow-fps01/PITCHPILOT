@@ -4,11 +4,12 @@ import asyncio
 from datetime import datetime, timezone
 
 import jwt as pyjwt
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -23,7 +24,6 @@ from app.models.user import PLAN_PLUS, User
 from app.schemas.auth import (
     AccountDeleteRequest,
     ChangePasswordRequest,
-    EmailAvailability,
     ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
@@ -33,6 +33,7 @@ from app.schemas.auth import (
     UserPublic,
     VerificationStatus,
     VerifyRequest,
+    WsTicketRequest,
     WsTicketResponse,
 )
 from app.services.billing import PaystackError, cancel_plus
@@ -42,7 +43,17 @@ from app.services.email import (
     send_verification_email,
 )
 from app.services.knowledge import schedule_seed_default_cards
-from app.services.rate_limit import rate_limit
+from app.services.passwords import password_contains_identity
+from app.services.rate_limit import (
+    clear as clear_rate_limit,
+    client_ip,
+    hash_email,
+    hit as rate_limit_hit,
+    login_failure_key,
+    rate_limit,
+    record_login_failure,
+    retry_after as rate_limit_retry_after,
+)
 from app.services.security import (
     create_access_token,
     create_email_verification_token,
@@ -50,12 +61,40 @@ from app.services.security import (
     decode_email_verification_token,
     decode_password_reset_token,
     hash_password,
+    mask_email,
     verify_password,
 )
 from app.services.session_registry import registry
 from app.services.ws_tickets import ws_tickets
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Used to keep login timing similar for known and unknown email addresses.
+_DUMMY_HASH = hash_password("pitchpilot-dummy-password-not-used")
+
+_REGISTRATION_MESSAGE = (
+    "If this email is available, your account is ready. Sign in to continue."
+)
+
+
+def _registration_response() -> MessageResponse:
+    return MessageResponse(message=_REGISTRATION_MESSAGE)
+
+
+def _too_many_attempts(retry_after: float) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="Too many failed sign-in attempts. Try again later.",
+        headers={"Retry-After": str(max(1, int(retry_after) + 1))},
+    )
+
+
+def _check_password_identity(email: str, password: str) -> None:
+    if password_contains_identity(password, email):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choose a password that does not contain your email address",
+        )
 
 
 def _registration_allowed(email: str, settings: Settings) -> bool:
@@ -75,8 +114,8 @@ def _token_response(user: User) -> TokenResponse:
 
 async def _send_verification(user: User) -> None:
     settings = get_settings()
-    token = create_email_verification_token(user.id)
-    link = f"{settings.frontend_base_url.rstrip('/')}/?verify={token}"
+    token = create_email_verification_token(user.id, user.token_version)
+    link = f"{settings.frontend_base_url.rstrip('/')}/#verify={token}"
     await send_verification_email(settings, to=user.email, link=link)
 
 
@@ -87,7 +126,7 @@ async def _send_password_reset(user: User) -> None:
         user.token_version,
         expires_minutes=settings.password_reset_token_minutes,
     )
-    link = f"{settings.frontend_base_url.rstrip('/')}/?reset={token}"
+    link = f"{settings.frontend_base_url.rstrip('/')}/#reset={token}"
     await send_password_reset_email(
         settings,
         to=user.email,
@@ -98,13 +137,14 @@ async def _send_password_reset(user: User) -> None:
 
 @router.post(
     "/register",
-    response_model=TokenResponse,
-    status_code=status.HTTP_201_CREATED,
+    response_model=MessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
     dependencies=[Depends(rate_limit("auth"))],
 )
 async def register(
     payload: RegisterRequest, db: AsyncSession = Depends(get_db)
-) -> TokenResponse:
+) -> MessageResponse:
+    """Create an account without revealing whether the email already exists."""
     settings = get_settings()
     email = payload.email.lower()
     if not _registration_allowed(email, settings):
@@ -112,12 +152,13 @@ async def register(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Sign-ups are currently invite-only.",
         )
+    _check_password_identity(email, payload.password)
     existing = await db.scalar(select(User).where(User.email == email))
     if existing is not None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists",
+        logger.info(
+            f"Registration attempted for an existing email: {mask_email(email)}"
         )
+        return _registration_response()
     require_verification = settings.require_email_verification
     user = User(
         email=email,
@@ -125,13 +166,20 @@ async def register(
         email_verified=not require_verification,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent registration for the same address: return the same
+        # generic response instead of leaking the race as a 409/500.
+        await db.rollback()
+        logger.info(f"Registration raced for an existing email: {mask_email(email)}")
+        return _registration_response()
     await db.refresh(user)
-    logger.info(f"New user registered: {email}")
+    logger.info(f"New user registered: {mask_email(email)}")
     schedule_seed_default_cards(user.id)  # F3: default RAG deck (background)
     if require_verification:
         asyncio.create_task(_send_verification(user))
-    return _token_response(user)
+    return _registration_response()
 
 
 @router.post(
@@ -140,26 +188,49 @@ async def register(
     dependencies=[Depends(rate_limit("auth"))],
 )
 async def login(
-    payload: LoginRequest, db: AsyncSession = Depends(get_db)
+    payload: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> TokenResponse:
     email = payload.email.lower()
-    user = await db.scalar(select(User).where(User.email == email))
-    if user is None or not verify_password(payload.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password"
+    failure_key = login_failure_key(email)
+    retry = await rate_limit_retry_after(failure_key)
+    if retry > 0:
+        logger.warning(
+            f"Locked login attempt for {mask_email(email)} from {client_ip(request)}"
         )
-    logger.info(f"User logged in: {email}")
+        raise _too_many_attempts(retry)
+
+    user = await db.scalar(select(User).where(User.email == email))
+    if user is None:
+        # Run a real bcrypt comparison for unknown addresses so response timing
+        # does not reveal whether the account exists.
+        verify_password(payload.password, _DUMMY_HASH)
+        failure = await record_login_failure(failure_key)
+        logger.warning(
+            f"Failed login for {mask_email(email)} from {client_ip(request)}"
+        )
+        if failure.retry_after > 0:
+            raise _too_many_attempts(failure.retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+    if not verify_password(payload.password, user.hashed_password):
+        failure = await record_login_failure(failure_key)
+        logger.warning(
+            f"Failed login for {mask_email(email)} from {client_ip(request)}"
+        )
+        if failure.retry_after > 0:
+            raise _too_many_attempts(failure.retry_after)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
+        )
+
+    await clear_rate_limit(failure_key)
+    logger.info(f"User logged in: {mask_email(email)}")
     return _token_response(user)
-
-
-@router.get("/email-available", response_model=EmailAvailability)
-async def email_available() -> EmailAvailability:
-    """Public capability check for the sign-in screen.
-
-    Password recovery is hidden when this deployment cannot send email yet.
-    The response deliberately says nothing about which provider is configured.
-    """
-    return EmailAvailability(available=email_provider_configured(get_settings()))
 
 
 @router.post(
@@ -172,19 +243,25 @@ async def forgot_password(
 ) -> MessageResponse:
     """Send a reset link when the account exists.
 
-    The response is identical for known and unknown addresses so this endpoint
-    cannot be used to enumerate accounts.
+    The response is identical for known and unknown addresses, and when email
+    delivery is not configured. A per-email budget prevents reset-email
+    bombing once SMTP/Resend is enabled.
     """
     settings = get_settings()
-    if not email_provider_configured(settings):
-        logger.warning("Password reset requested but no email provider is configured")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Password recovery is temporarily unavailable. Please contact support.",
-        )
-    user = await db.scalar(select(User).where(User.email == payload.email.lower()))
-    if user is not None:
-        asyncio.create_task(_send_password_reset(user))
+    email = payload.email.lower()
+    reset_budget = await rate_limit_hit(
+        f"reset:email:{hash_email(email)}", 3, 3600
+    )
+    if reset_budget.allowed:
+        if not email_provider_configured(settings):
+            logger.warning(
+                f"Password reset requested for {mask_email(email)} but no email "
+                "provider is configured"
+            )
+        else:
+            user = await db.scalar(select(User).where(User.email == email))
+            if user is not None:
+                asyncio.create_task(_send_password_reset(user))
     return MessageResponse(
         message="If that email has an account, we've sent a reset link."
     )
@@ -212,11 +289,16 @@ async def reset_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This reset link is invalid or has expired",
         )
+    _check_password_identity(user.email, payload.password)
     user.hashed_password = hash_password(payload.password)
     user.token_version += 1
     await db.commit()
-    ws_tickets.revoke_user(str(user.id))
-    logger.info(f"Password reset for {user.email}")
+    await ws_tickets.revoke_user(str(user.id))
+    try:
+        await registry.finalize_user(user.id)
+    except Exception as exc:  # noqa: BLE001  -  logout must not 500
+        logger.warning(f"Failed to finalize live sessions after password reset: {exc}")
+    logger.info(f"Password reset for {mask_email(user.email)}")
     return MessageResponse(message="Password updated. Sign in with your new password.")
 
 
@@ -246,14 +328,60 @@ async def change_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Choose a password you haven't used for this account",
         )
+    _check_password_identity(current_user.email, payload.new_password)
 
     current_user.hashed_password = hash_password(payload.new_password)
     current_user.token_version += 1
     await db.commit()
     await db.refresh(current_user)
-    ws_tickets.revoke_user(str(current_user.id))
-    logger.info(f"Password changed for {current_user.email}")
+    await ws_tickets.revoke_user(str(current_user.id))
+    try:
+        await registry.finalize_user(current_user.id)
+    except Exception as exc:  # noqa: BLE001  -  password change must not 500
+        logger.warning(f"Failed to finalize live sessions after password change: {exc}")
+    logger.info(f"Password changed for {mask_email(current_user.email)}")
     return _token_response(current_user)
+
+
+async def _revoke_all_sessions(
+    current_user: User, db: AsyncSession
+) -> MessageResponse:
+    """Bump token_version (revoking every access token) and close live sockets."""
+    current_user.token_version += 1
+    await db.commit()
+    await ws_tickets.revoke_user(str(current_user.id))
+    try:
+        await registry.finalize_user(current_user.id)
+    except Exception as exc:  # noqa: BLE001  -  logout must not 500
+        logger.warning(f"Failed to finalize live sessions on logout: {exc}")
+    logger.info(f"Signed out all sessions for {mask_email(current_user.email)}")
+    return MessageResponse(message="Signed out.")
+
+
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit("logout"))],
+)
+async def logout(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    """Sign out this device and every other session for the account."""
+    return await _revoke_all_sessions(current_user, db)
+
+
+@router.post(
+    "/logout-all",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit("logout"))],
+)
+async def logout_all(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MessageResponse:
+    """Explicit alias for revoking every session on every device."""
+    return await _revoke_all_sessions(current_user, db)
 
 
 @router.get("/me", response_model=UserPublic)
@@ -267,7 +395,7 @@ async def verify_email(
 ) -> User:
     """Confirm an email address from the link sent at registration."""
     try:
-        user_id = decode_email_verification_token(payload.token)
+        user_id, token_version = decode_email_verification_token(payload.token)
     except pyjwt.InvalidTokenError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -278,11 +406,16 @@ async def verify_email(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
+    if token_version != user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This verification link is invalid or has expired",
+        )
     if not user.email_verified:
         user.email_verified = True
         await db.commit()
         await db.refresh(user)
-        logger.info(f"Email verified for {user.email}")
+        logger.info(f"Email verified for {mask_email(user.email)}")
     return user
 
 
@@ -315,7 +448,7 @@ async def accept_recording_consent(
     current_user.consent_version = settings.consent_version
     await db.commit()
     await db.refresh(current_user)
-    logger.info(f"Recording consent accepted by {current_user.email}")
+    logger.info(f"Recording consent accepted by {mask_email(current_user.email)}")
     return current_user
 
 
@@ -463,7 +596,7 @@ async def delete_account(
                     "Please try again in a moment or contact support."
                 ),
             )
-        except Exception as exc:  # noqa: BLE001 — never delete with a live charge
+        except Exception as exc:  # noqa: BLE001  -  never delete with a live charge
             logger.error(f"Unexpected subscription cancellation failure: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -476,8 +609,8 @@ async def delete_account(
     await registry.finalize_user(user_id)
     await db.delete(current_user)
     await db.commit()
-    ws_tickets.revoke_user(str(user_id))
-    logger.info(f"Account deleted: {email}")
+    await ws_tickets.revoke_user(str(user_id))
+    logger.info(f"Account deleted: {mask_email(email)}")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -486,8 +619,25 @@ async def delete_account(
     response_model=WsTicketResponse,
     dependencies=[Depends(rate_limit("ws-ticket"))],
 )
-async def ws_ticket(current_user: User = Depends(get_current_user)) -> WsTicketResponse:
-    """Mint a short-lived credential for the WebSocket handshake (keeps the
-    JWT out of URLs and access logs)."""
-    ticket, ttl = ws_tickets.issue(str(current_user.id))
+async def ws_ticket(
+    payload: WsTicketRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> WsTicketResponse:
+    """Mint a short-lived, single-use ticket bound to one owned session.
+
+    Browsers cannot set WebSocket headers, so the ticket travels in the query
+    string instead of the long-lived JWT.
+    """
+    session = await db.scalar(
+        select(CoachingSession).where(
+            CoachingSession.id == payload.session_id,
+            CoachingSession.user_id == current_user.id,
+        )
+    )
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Session not found"
+        )
+    ticket, ttl = await ws_tickets.issue(str(current_user.id), str(session.id))
     return WsTicketResponse(ticket=ticket, expires_in=ttl)

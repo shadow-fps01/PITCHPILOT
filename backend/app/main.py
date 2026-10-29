@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import uuid
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -10,6 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from loguru import logger
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import auth_router, billing_router, scripts_router, sessions_router, stream_router
 from app.config.settings import get_settings
@@ -35,10 +37,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     issues = production_config_issues(settings)
     if issues:
         joined = "; ".join(issues)
-        logger.error(f"Refusing to start: insecure production config → {joined}")
+        logger.error(f"Refusing to start: insecure production config -> {joined}")
         raise RuntimeError(f"Insecure production configuration: {joined}")
 
-    # Live sessions hold per-session state in-process — warn on multi-worker.
+    # Live sessions hold per-session state in-process -- warn on multi-worker.
     workers = os.environ.get("WEB_CONCURRENCY") or os.environ.get("UVICORN_WORKERS")
     if workers is not None and str(workers).isdigit() and int(workers) > 1:
         logger.warning(
@@ -51,7 +53,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             await create_all_tables()
             logger.info("Database tables verified/created")
-        except Exception as exc:  # noqa: BLE001 — DB may not be up yet
+        except Exception as exc:  # noqa: BLE001  -  DB may not be up yet
             logger.warning(
                 f"Automatic table creation skipped ({exc}). "
                 "Run `alembic upgrade head` once PostgreSQL is reachable."
@@ -59,8 +61,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     from app.services.stt import resolve_stt_choice
 
     stt_choice = resolve_stt_choice(settings)
-    if stt_choice == "mock":
-        logger.info("STT provider: mock (demo mode — no transcription key found)")
+    if stt_choice == "none":
+        logger.error(
+            "STT provider: not configured  -  live transcription will be "
+            "unavailable until a transcription provider key is set"
+        )
     else:
         logger.info(f"STT provider: {stt_choice} (live transcription active)")
 
@@ -76,7 +81,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     from app.services.embedding import get_shared_embedding_client
 
     anticipator_mode = "vector search (Gemini embeddings)" if get_shared_embedding_client() is not None else "keyword search (no embedding key)"
-    logger.info(f"Next-topic anticipation: {'enabled — ' + anticipator_mode if settings.anticipation_enabled else 'disabled'}")
+    logger.info(f"Next-topic anticipation: {'enabled  -  ' + anticipator_mode if settings.anticipation_enabled else 'disabled'}")
 
     # F5: screen vision. Hosted web clients share a tab/window explicitly and
     # send frames over their live WebSocket; a server-side mss capture is only
@@ -139,16 +144,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             f"(verification {'on' if settings.require_email_verification else 'off'})"
         )
     else:
-        logger.info(
-            "Email delivery: disabled (no provider configured; password recovery hidden)"
+        logger.warning(
+            "Email delivery: disabled (no provider configured; password recovery "
+            "returns a generic response but cannot deliver a reset link in production)"
         )
     if not settings.require_recording_consent:
         logger.warning(
-            "REQUIRE_RECORDING_CONSENT=false — users can start sessions without "
+            "REQUIRE_RECORDING_CONSENT=false  -  users can start sessions without "
             "confirming permission to record the call"
         )
 
-    # Billing — PitchPilot Plus (Paystack subscription, demo fallback)
+    # Billing  -  PitchPilot Plus (Paystack subscription, demo fallback)
     from app.services.billing import paystack_key_mode, resolve_provider
 
     payments_mode = resolve_provider(settings)
@@ -158,7 +164,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         else ""
     )
     logger.info(
-        f"Payments: {payments_mode}{paystack_mode} — Plus "
+        f"Payments: {payments_mode}{paystack_mode}  -  Plus "
         f"{settings.plus_price_display}/mo "
         f"({settings.free_monthly_sessions} free sessions & "
         f"{settings.free_monthly_scripts} free scripts per month on the free plan)"
@@ -217,7 +223,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await asyncio.wait_for(registry.finalize_all(), timeout=8.0)
     except asyncio.TimeoutError:
         logger.warning("Timed out finalizing live sessions during shutdown")
-    except Exception as exc:  # noqa: BLE001 — shutdown must continue
+    except Exception as exc:  # noqa: BLE001  -  shutdown must continue
         logger.warning(f"Live-session shutdown finalization failed: {exc}")
 
     if vision_worker is not None:
@@ -228,20 +234,68 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     logger.info(f"{settings.app_name} shutting down")
 
 
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+_IS_PRODUCTION = settings.environment.strip().lower() == "production"
+_docs_enabled = not _IS_PRODUCTION
+
+_API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+
+
+def _apply_security_headers(response, request_id: str, path: str) -> None:
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["X-Permitted-Cross-Domain-Policies"] = "none"
+    response.headers["Cache-Control"] = "no-store"
+    # The API never returns HTML in production (docs are disabled), so a
+    # locked-down CSP is safe. In development the docs pages need their CDN
+    # assets, so only send the API CSP for JSON endpoints.
+    if _IS_PRODUCTION or not path.startswith(("/docs", "/redoc", "/openapi")):
+        response.headers["Content-Security-Policy"] = _API_CSP
+    if _IS_PRODUCTION:
+        response.headers["Strict-Transport-Security"] = (
+            "max-age=31536000; includeSubDomains"
+        )
+
+
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="Just-in-time live public speaking & Zoom pitch coach",
     lifespan=lifespan,
+    docs_url="/docs" if _docs_enabled else None,
+    redoc_url="/redoc" if _docs_enabled else None,
+    openapi_url="/openapi.json" if _docs_enabled else None,
 )
 
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Attach a stable request id to every response for log correlation."""
-    request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+    """Attach a sanitized request id and the API security headers."""
+    incoming = request.headers.get("x-request-id", "")
+    request_id = incoming if _REQUEST_ID_RE.fullmatch(incoming) else uuid.uuid4().hex
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            too_large = int(content_length) > settings.max_http_body_bytes
+        except ValueError:
+            response = JSONResponse(
+                {"detail": "Invalid Content-Length header"}, status_code=400
+            )
+            _apply_security_headers(response, request_id, request.url.path)
+            return response
+        if too_large:
+            response = JSONResponse(
+                {"detail": "Request body too large"}, status_code=413
+            )
+            _apply_security_headers(response, request_id, request.url.path)
+            return response
+
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
+    _apply_security_headers(response, request_id, request.url.path)
     if response.status_code >= 500:
         logger.error(
             f"{request.method} {request.url.path} -> {response.status_code} "
@@ -257,6 +311,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Outermost middleware: rejects requests whose Host header is not ours
+# (DNS-rebinding / Host-header attacks) before routing.
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_hosts)
+
 
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(billing_router, prefix=settings.api_prefix)
@@ -281,7 +339,7 @@ async def ready() -> JSONResponse:
     try:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001 — readiness must not leak details
+    except Exception as exc:  # noqa: BLE001  -  readiness must not leak details
         logger.warning(f"Readiness check failed: {exc}")
         return JSONResponse(
             status_code=503,

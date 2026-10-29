@@ -1,9 +1,9 @@
 """Copilot dialogue smoke test (Cluely-style copilot).
 
-Part 1 (offline) — trigger heuristics + keyless fallback, no network.
-Part 2 (live)    — full WebSocket flow against a running backend:
+Part 1 (offline)  -  trigger heuristics + keyless fallback, no network.
+Part 2 (live)     -  full WebSocket flow against a running backend:
                    auth → session → WS → `ask` → copilot `answer`.
-                 — registers a fresh throwaway user each run (free quota).
+                  -  registers a fresh throwaway user each run (free quota).
 
 Run (backend must be up, e.g. `npm run dev` in frontend/):
     $env:PYTHONPATH='.'; .venv\\Scripts\\python scripts\\copilot_test.py
@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# Windows consoles often default to cp1252 — force UTF-safe output (the box-
+# Windows consoles often default to cp1252  -  force UTF-safe output (the box-
 # drawing glyphs below otherwise raise UnicodeEncodeError).
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -26,24 +26,23 @@ import websockets  # noqa: E402
 
 from app.config.settings import get_settings  # noqa: E402
 from app.services.copilot_chat import (  # noqa: E402
-    CopilotChat,
-    HeuristicCopilot,
     _looks_like_objection,
     _looks_like_question,
 )
+from app.services.web_search import is_factual_moment  # noqa: E402
 
 BASE = "http://127.0.0.1:8000/api"
 WS_BASE = "ws://127.0.0.1:8000/api"
 # A fresh user per run: free-tier quota is 3 sessions/month, so a reused
 # account eventually trips the 402 paywall and blocks the live check.
 EMAIL = f"pitchpilot.copilot.{__import__('time').strftime('%Y%m%d%H%M%S')}@example.com"
-PASSWORD = "demodemo123"
+PASSWORD = "throwaway-test-123"
 
 
 def part1_offline() -> bool:
     print("── Part 1: offline trigger heuristics + fallback ──")
     checks = [
-        # (text, is_question, is_objection) — the two flags are independent:
+        # (text, is_question, is_objection)  -  the two flags are independent:
         # "What is your pricing?" is legitimately both.
         ("What is your pricing?", True, True),
         ("How does the integration work?", True, True),  # "integration" is an objection keyword too
@@ -61,13 +60,17 @@ def part1_offline() -> bool:
             ok = False
         print(f"  [{status}] {text!r:45} question={got_q} objection={got_obj}")
 
-    fallback = HeuristicCopilot()
-    answer = fallback.answer_question(
-        "what about pricing", "we spoke about the product a lot", None,
-        "1. Problem\n2. Pricing: 15 dollars per seat", ["pricing"],
-    )
-    print(f"  [{'OK ' if answer else 'FAIL'}] heuristic fallback answer: {answer!r}")
-    return ok and answer is not None
+    search_checks = [
+        ("How does your pricing compare to competitors?", True),
+        ("Do you integrate with HubSpot?", True),
+        ("Sounds good, thanks.", False),
+    ]
+    for text, want in search_checks:
+        got = is_factual_moment(text)
+        if got != want:
+            ok = False
+        print(f"  [{'OK ' if got == want else 'FAIL'}] factual search gate {text!r:45} -> {got}")
+    return ok
 
 
 async def part2_live() -> bool:
@@ -106,12 +109,12 @@ async def part2_live() -> bool:
                 {
                     "type": "ask",
                     "id": "q1",
-                    "text": "The customer asked what happens after the free trial — "
+                    "text": "The customer asked what happens after the free trial  -  "
                     "what should I tell them?",
                 }
             )
         )
-        print("  [ws] connected, asked a question — waiting for the copilot…")
+        print("  [ws] connected, asked a question  -  waiting for the copilot…")
         try:
             while True:
                 remaining = deadline - asyncio.get_event_loop().time()
@@ -134,6 +137,8 @@ async def part2_live() -> bool:
                     if kind == "answer" and message.get("reply_to") == "q1":
                         got_answer = True
                         print(f"  [copilot answer] {message['text'][:220]}")
+                        for src in message.get("sources") or []:
+                            print(f"      source: {src.get('title')} - {src.get('url')}")
                         break
                     if kind == "status":
                         print(f"  [copilot status] {message['text'][:160]}")

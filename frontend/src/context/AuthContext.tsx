@@ -13,7 +13,8 @@ import {
   type ReactNode,
 } from "react";
 import { authApi, getStoredToken, setStoredToken } from "@/lib/api";
-import type { User } from "@/types";
+import { clearUrlToken, readUrlToken } from "@/lib/utils";
+import type { MessageResponse, User } from "@/types";
 
 interface AuthContextValue {
   user: User | null;
@@ -21,10 +22,12 @@ interface AuthContextValue {
   /** True during the initial restore-from-storage check. */
   initializing: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  /** Register and return the backend's generic confirmation message. */
+  register: (email: string, password: string) => Promise<MessageResponse>;
   /** Change the password and replace the current session token. */
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
-  logout: () => void;
+  /** Revoke this session server-side, then clear local auth state. */
+  logout: () => Promise<void>;
   /** Re-fetch the current user (plan state can change after checkout). */
   refreshUser: () => Promise<void>;
   /** Record permission to capture/transcribe the call. */
@@ -42,20 +45,13 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
   const [initializing, setInitializing] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
 
-  // Handle the ?verify=<token> link from the verification email.
+  // Handle the #verify=<token> fragment from the verification email.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const verificationToken = params.get("verify");
+    const verificationToken = readUrlToken("verify");
     if (verificationToken === null) return;
 
     // Strip the token from the address bar immediately (no replay on refresh).
-    params.delete("verify");
-    const query = params.toString();
-    window.history.replaceState(
-      {},
-      "",
-      `${window.location.pathname}${query.length > 0 ? `?${query}` : ""}${window.location.hash}`,
-    );
+    clearUrlToken("verify");
 
     let cancelled = false;
     authApi
@@ -88,8 +84,9 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
   // work even in a browser that still holds an old (soon-to-be-invalid) token.
   useEffect(() => {
     let cancelled = false;
-    const resetToken = new URLSearchParams(window.location.search).get("reset");
-    if (resetToken !== null && resetToken.length > 0) {
+    const resetToken = readUrlToken("reset");
+    if (resetToken !== null) {
+      clearUrlToken("reset");
       setStoredToken(null);
       setToken(null);
       setUser(null);
@@ -130,12 +127,11 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     setUser(response.user);
   }, []);
 
-  const register = useCallback(async (email: string, password: string): Promise<void> => {
-    const response = await authApi.register(email, password);
-    setStoredToken(response.access_token);
-    setToken(response.access_token);
-    setUser(response.user);
-  }, []);
+  const register = useCallback(
+    async (email: string, password: string): Promise<MessageResponse> =>
+      authApi.register(email, password),
+    [],
+  );
 
   const changePassword = useCallback(
     async (currentPassword: string, newPassword: string): Promise<void> => {
@@ -147,7 +143,13 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
     [],
   );
 
-  const logout = useCallback((): void => {
+  const logout = useCallback(async (): Promise<void> => {
+    try {
+      // Revoke the token server-side so it cannot be replayed if it leaks.
+      await authApi.logout();
+    } catch {
+      /* network failure must not trap the user in a signed-in shell */
+    }
     setStoredToken(null);
     setToken(null);
     setUser(null);

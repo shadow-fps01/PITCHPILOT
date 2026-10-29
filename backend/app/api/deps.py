@@ -39,8 +39,21 @@ async def get_current_user(
     if user is None:
         raise _unauthorized("User no longer exists")
     if token_version != user.token_version:
-        raise _unauthorized("Your session has expired — please sign in again")
+        raise _unauthorized("Your session has expired  -  please sign in again")
     return user
+
+
+async def require_email_verified(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Email-verification gate for write endpoints that do not need consent."""
+    settings = get_settings()
+    if settings.require_email_verification and not current_user.email_verified:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Please verify your email address to continue.",
+        )
+    return current_user
 
 
 async def require_verified_email(

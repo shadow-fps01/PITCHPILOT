@@ -19,18 +19,20 @@ from app.models.user import User
 from app.services.embedding import get_shared_embedding_client
 
 # A compact default deck so every new account has working anticipation
-# from day one (pitch-copilot Q&A the anticipator can pre-fetch).
+# from day one. These are prompts, not claims: the copilot must not present a
+# seeded pricing/traction/team number as the user's own fact. Users fill in
+# their real numbers in their scripts and knowledge cards.
 DEFAULT_SEED_CARDS: list[tuple[str, str, list[str]]] = [
-    ("Pricing model", "Pricing is $49 per seat per month, with a 20% discount on annual billing. Volume tiers kick in at 25 seats, and there is a 14-day free trial with no card required.", ["pricing", "discount", "cost", "price", "free trial"]),
-    ("The ask", "We are raising $500,000 to fund 12 months of runway: 60% engineering (realtime infra, more languages), 25% go-to-market for sales teams, 15% compliance and security certifications.", ["the ask", "fundraising", "raise", "runway", "valuation"]),
-    ("Traction", "40 pilots signed in the last quarter with 68% converting to paid. Weekly active usage sits at 4.2 sessions per user, and NPS from founders is 61.", ["traction", "pilots", "conversion", "nps", "growth"]),
-    ("Roadmap", "Next quarter: Spanish and French transcription, deeper CRM integrations (HubSpot, Salesforce), team workspaces with shared scripts, and an on-device mode for privacy-sensitive customers.", ["roadmap", "next quarter", "languages", "integrations", "crm"]),
-    ("Team", "Two full-time engineers (ex-realtime infra backgrounds), one designer, and a part-time speech-language-pathology advisor who tunes the coaching heuristics.", ["team", "founders", "engineers", "advisor"]),
+    ("Pricing model", "What is your price per seat, your annual discount, and your trial length? State only the exact numbers you are ready to defend on the call.", ["pricing", "discount", "cost", "price", "free trial"]),
+    ("The ask", "What are you asking for, how will you use it, and what will it unlock? Keep the amount and the milestones ready.", ["the ask", "fundraising", "raise", "runway", "valuation"]),
+    ("Traction", "Which proof points can you cite  -  pilots, conversion, usage, retention, NPS? Use only numbers you can defend.", ["traction", "pilots", "conversion", "nps", "growth"]),
+    ("Roadmap", "What are the next two quarters' milestones, and why do they matter to this audience?", ["roadmap", "next quarter", "languages", "integrations", "crm"]),
+    ("Team", "Who is on the team, and which experience makes them credible for this problem?", ["team", "founders", "engineers", "advisor"]),
     ("Competition", "Unlike generic teleprompters or post-hoc analytics tools, we coach live with short, private cues. The overlay is designed to stay out of a shared call tab or window; a whole-screen share will include it.", ["competition", "competitors", "differentiation", "unique"]),
-    ("Market size", "The online presentation-coaching and sales-enablement market is worth roughly $6B annually; our wedge is the 34M knowledge workers who pitch on video calls weekly.", ["market", "market size", "tam", "growth"]),
+    ("Market size", "What is the addressable market, and which slice are you winning first? Be ready to name the source of the number.", ["market", "market size", "tam", "growth"]),
     ("Security & privacy", "Audio is processed live and is not stored. Transcript excerpts and coaching notes are removed after 30 days. Screen frames are analyzed and discarded. Share only the call tab or window; a whole-screen share includes the overlay.", ["security", "privacy", "encryption", "retention", "screen"]),
-    ("Onboarding & setup", "Setup takes under five minutes: register, paste your outline, start a session. Works beside any calling app — no calendar or Zoom admin permissions needed.", ["onboarding", "setup", "integration", "zoom"]),
-    ("Performance & latency", "Live cues render in under 200 ms from speech: 16 kHz PCM streams over WebSockets to Deepgram/Groq, with exponential-backoff reconnects if a call drops.", ["latency", "performance", "realtime", "websocket", "speed"]),
+    ("Onboarding & setup", "How quickly can a new customer get value, and what are the exact setup steps?", ["onboarding", "setup", "integration", "zoom"]),
+    ("Performance & latency", "What performance numbers can you substantiate, and how do you measure them?", ["latency", "performance", "realtime", "websocket", "speed"]),
 ]
 
 
@@ -70,7 +72,7 @@ async def upsert_script_card(
             )
             await db.commit()
         logger.info(f"Knowledge card stored for script {script_id} (embedded={embedding is not None})")
-    except Exception as exc:  # noqa: BLE001 — provisioning must never break the API
+    except Exception as exc:  # noqa: BLE001  -  provisioning must never break the API
         logger.warning(f"Failed to store knowledge card for script {script_id}: {exc}")
 
 

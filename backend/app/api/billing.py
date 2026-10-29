@@ -1,4 +1,4 @@
-"""Billing endpoints — plan status, Paystack checkout, cancel & webhooks."""
+"""Billing endpoints  -  plan status, Paystack checkout, cancel & webhooks."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -80,7 +80,12 @@ async def billing_cancel(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> BillingStatus:
-    """Cancel the Plus subscription (Paystack: at period end; demo: now)."""
+    """Cancel the Plus subscription at the payment provider (at period end).
+
+    Authoritative: the subscription is disabled at Paystack, so the next
+    renewal cannot be charged. A missing subscription or provider failure
+    returns an explicit retry instead of a false "cancelled" state.
+    """
     try:
         current_user = await cancel_plus(db, current_user, settings)
     except PaystackError as exc:
@@ -91,7 +96,7 @@ async def billing_cancel(
                 "We couldn't cancel your subscription just now. "
                 "Please try again in a moment."
             ),
-        )
+        ) from exc
     return await build_status(db, current_user, settings)
 
 

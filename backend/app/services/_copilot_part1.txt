@@ -1,0 +1,97 @@
+_LLM_TIMEOUT_SECONDS = 18.0
+_QUESTION_RE = re.compile(
+    r"\b(what|how|why|when|who|where|which|could you|can you|do you|"
+    r"are you|is there|tell me|explain|walk me|show me|any)\b.*",
+    re.IGNORECASE,
+)
+_QUESTION_END = "?"
+_OBJECTION_PHRASES = (
+    "too expensive", "price is", "pricing", "discount", "cheaper",
+    "budget", "cost", "think about it", "not sure", "not interested",
+    "call you back", "get back to you", "talk to my team", "my partner",
+    "competitor", "competitors", "alternative", "why should we",
+    "guarantee", "contract", "cancel", "lock in", "risks", "concern",
+    "how long does", "what happens if", "who else uses", "case study",
+    "integration", "security", "compliance", "gdpr", "timeline",
+)
+_QUESTION_STARTERS = ("what", "how", "why", "when", "who", "where", "which", "can", "could", "do", "does", "is", "are")
+
+
+def _looks_like_question(text: str) -> bool:
+    stripped = text.strip()
+    if stripped.endswith(_QUESTION_END):
+        return True
+    lower = stripped.lower()
+    return any(lower.startswith(starter + " ") for starter in _QUESTION_STARTERS) and len(stripped.split()) >= 3
+
+
+def _looks_like_objection(text: str) -> bool:
+    lower = text.lower()
+    return any(phrase in lower for phrase in _OBJECTION_PHRASES)
+
+
+def _extract_json(raw: str) -> dict:
+    """Robustly pull a JSON object out of an LLM reply."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    start, end = text.find("{"), text.rfind("}")
+    if start == -1 or end <= start:
+        raise ValueError("No JSON object in copilot reply")
+    payload = json.loads(text[start : end + 1])
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_streaming_text(buffer: str) -> str:
+    """Best-effort live value of the `"text"` field in a partial JSON reply.
+
+    Lets us render answer tokens as they arrive even though the model is
+    emitting a JSON object (`{"text": "..."}`). Tolerates incomplete escapes
+    and an unterminated string.
+    """
+    key = buffer.find('"text"')
+    if key == -1:
+        return ""
+    colon = buffer.find(":", key + 6)
+    if colon == -1:
+        return ""
+    quote = buffer.find('"', colon + 1)
+    if quote == -1:
+        return ""
+    escapes = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f"}
+    out: list[str] = []
+    i = quote + 1
+    while i < len(buffer):
+        char = buffer[i]
+        if char == "\\":
+            if i + 1 >= len(buffer):
+                break  # incomplete escape — wait for the next token
+            nxt = buffer[i + 1]
+            if nxt == "u" and i + 5 < len(buffer):
+                try:
+                    out.append(chr(int(buffer[i + 2 : i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            out.append(escapes.get(nxt, nxt))
+            i += 2
+            continue
+        if char == '"':
+            break
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _clean_freeform(raw: str) -> str | None:
+    """Fallback: strip a code fence and return prose when JSON parsing fails."""
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    text = text.strip()
+    return text or None

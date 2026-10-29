@@ -21,7 +21,7 @@ export function Logo({ size = 40, className, halo = false }: LogoProps): JSX.Ele
       style={{ width: size, height: size }}
     >
       {halo && (
-        <span className="absolute inset-[-30%] rounded-full bg-gradient-to-tr from-sky-500/25 via-violet-500/20 to-transparent blur-md animate-spin-slow" />
+        <span className="absolute inset-[-30%] rounded-full bg-gradient-to-tr from-amber-500/25 via-yellow-300/20 to-transparent blur-md animate-spin-slow" />
       )}
       <span className="absolute inset-0 rounded-2xl bg-gradient-brand opacity-90 shadow-glow" />
       <span className="absolute inset-[1.5px] rounded-[14px] bg-ink-950/85 backdrop-blur" />

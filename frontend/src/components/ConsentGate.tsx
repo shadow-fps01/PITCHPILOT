@@ -66,7 +66,7 @@ export function ConsentGate(): JSX.Element | null {
           className="panel fixed left-1/2 top-1/2 z-[70] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 animate-scale-in p-6 sm:p-7"
         >
           <div className="flex items-start gap-3">
-            <span className="rounded-2xl border border-sky-400/20 bg-sky-400/10 p-2.5 text-sky-300">
+            <span className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-2.5 text-amber-300">
               <ShieldCheck size={20} />
             </span>
             <div>
@@ -95,7 +95,7 @@ export function ConsentGate(): JSX.Element | null {
               type="checkbox"
               checked={checked}
               onChange={(event) => setChecked(event.target.checked)}
-              className="mt-0.5 size-4 shrink-0 accent-sky-400"
+              className="mt-0.5 size-4 shrink-0 accent-amber-400"
             />
             <span className="text-xs leading-relaxed text-slate-300">
               I have permission to record this call and agree to the{" "}
@@ -103,7 +103,7 @@ export function ConsentGate(): JSX.Element | null {
                 href={privacyUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+                className="font-semibold text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
               >
                 Privacy Policy
               </a>{" "}
@@ -112,7 +112,7 @@ export function ConsentGate(): JSX.Element | null {
                 href={termsUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+                className="font-semibold text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
               >
                 Terms
               </a>

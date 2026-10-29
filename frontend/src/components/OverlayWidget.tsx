@@ -28,8 +28,10 @@ import {
   Check,
   Copy,
   CornerDownLeft,
+  AlertTriangle,
   Eye,
   EyeOff,
+  ExternalLink,
   Loader2,
   Monitor,
   MessageSquareWarning,
@@ -49,7 +51,7 @@ import { ApiError, API_BASE, authApi, getStoredToken, sessionsApi } from "@/lib/
 import { Teleprompter } from "@/components/Teleprompter";
 import { WpmGauge } from "@/components/WpmGauge";
 import { Waveform } from "@/components/ui/Waveform";
-import { cn, formatDuration } from "@/lib/utils";
+import { cn, formatDuration, safeExternalUrl } from "@/lib/utils";
 import type {
   DialogueEntry,
   MetricsMessage,
@@ -108,7 +110,7 @@ export function OverlayWidget(): JSX.Element {
     summary: SessionEndedMessage["summary"];
   } | null>(null);
 
-  // ── Copilot state ──
+  // â”€â”€ Copilot state â”€â”€
   const [status, setStatus] = useState<SessionStatusMessage | null>(null);
   const [prompterOn, setPrompterOn] = useState(false);
   const [dialogue, setDialogue] = useState<DialogueEntry[]>([]);
@@ -143,7 +145,7 @@ export function OverlayWidget(): JSX.Element {
 
   const recorder = useAudioRecorder();
 
-  // ── Resolve or create the coaching session ───────────────────────────
+  // â”€â”€ Resolve or create the coaching session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     if (sessionId !== null) return;
     let cancelled = false;
@@ -174,7 +176,7 @@ export function OverlayWidget(): JSX.Element {
   const wsUrl = useCallback(async (): Promise<string> => {
     if (sessionId === null) return "";
     try {
-      const { ticket } = await authApi.wsTicket();
+      const { ticket } = await authApi.wsTicket(sessionId);
       return wsUrlFor(sessionId, ticket);
     } catch (err) {
       setSessionError(
@@ -190,7 +192,7 @@ export function OverlayWidget(): JSX.Element {
   // audio is transcribed separately and must never drive the speaking coach.
   const effectiveMicLevel = recorder.micLevel;
 
-  // ── WebSocket wiring ────────────────────────────────────────────────
+  // â”€â”€ WebSocket wiring â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleMessage = useCallback(
     (message: ServerMessage): void => {
       switch (message.type) {
@@ -279,6 +281,8 @@ export function OverlayWidget(): JSX.Element {
                 text: message.text,
                 kind: message.kind,
                 trigger: message.trigger,
+                reply_to: message.reply_to,
+                sources: message.sources,
                 streaming: false,
                 pending: false,
               };
@@ -292,6 +296,8 @@ export function OverlayWidget(): JSX.Element {
                 kind: message.kind,
                 text: message.text,
                 trigger: message.trigger,
+                reply_to: message.reply_to,
+                sources: message.sources,
                 receivedAt: Date.now(),
               },
             ].slice(-MAX_DIALOGUE_ENTRIES);
@@ -371,7 +377,7 @@ export function OverlayWidget(): JSX.Element {
     }
   }, [wsStatus, sendControl]);
 
-  // ── Auto-scroll the dialogue feed ────────────────────────────────────
+  // â”€â”€ Auto-scroll the dialogue feed â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   useEffect(() => {
     const feed = feedRef.current;
     if (feed !== null) {
@@ -379,7 +385,7 @@ export function OverlayWidget(): JSX.Element {
     }
   }, [dialogue]);
 
-  // ── Controls ──────────────────────────────────────────────────────────
+  // â”€â”€ Controls â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const handleScreenEnded = useCallback((): void => {
     sendControl({ type: "screen", action: "stop" });
   }, [sendControl]);
@@ -527,7 +533,7 @@ export function OverlayWidget(): JSX.Element {
     setView,
   ]);
 
-  // ── Keyboard shortcuts (hands-free during a call) ─────────────────────
+  // â”€â”€ Keyboard shortcuts (hands-free during a call) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Space = start / stop, Esc = end session, C = copy the last copilot line.
   useEffect(() => {
     const onKeyDown = (event: globalThis.KeyboardEvent): void => {
@@ -588,7 +594,7 @@ export function OverlayWidget(): JSX.Element {
           : { color: "bg-slate-500", label: "Offline", ping: false };
 
   const cardStyle = {
-    backgroundColor: `rgba(6, 10, 22, ${settings.overlayOpacity})`,
+    backgroundColor: `rgba(10, 9, 15, ${settings.overlayOpacity})`,
   };
 
   const prompterAvailable =
@@ -600,7 +606,7 @@ export function OverlayWidget(): JSX.Element {
   // Ambient glow behind the card, driven by the live mic level.
   const energy = Math.min(1, effectiveMicLevel);
   const glowStyle = {
-    background: `radial-gradient(circle at 50% 0%, rgba(56,189,248,${0.28 + energy * 0.5}), transparent 62%)`,
+    background: `radial-gradient(circle at 50% 0%, rgba(251,191,36,${0.28 + energy * 0.5}), transparent 62%)`,
     opacity: 0.55 + energy * 0.45,
   };
 
@@ -608,13 +614,13 @@ export function OverlayWidget(): JSX.Element {
     <main className="relative flex min-h-full items-start justify-center overflow-hidden bg-ink-950 px-3 py-6">
       {/* reactive ambience */}
       <div className="pointer-events-none fixed inset-0 -z-10" style={glowStyle} />
-      <div className="pointer-events-none fixed bottom-0 left-1/2 -z-10 h-72 w-72 -translate-x-1/2 rounded-full bg-violet-500/20 blur-3xl" />
+      <div className="pointer-events-none fixed bottom-0 left-1/2 -z-10 h-72 w-72 -translate-x-1/2 rounded-full bg-amber-500/20 blur-3xl" />
 
       <div
         className="relative z-10 flex h-[calc(100vh-3rem)] w-full max-w-[420px] flex-col overflow-hidden rounded-3xl border border-white/10 shadow-panel backdrop-blur-2xl transition-colors"
         style={cardStyle}
       >
-        {/* ── Top bar ── */}
+        {/* â”€â”€ Top bar â”€â”€ */}
         <div className="desktop-drag flex items-center gap-2 px-4 pt-3.5">
           <span className="relative flex h-2.5 w-2.5 shrink-0">
             {statusDot.ping && (
@@ -661,7 +667,7 @@ export function OverlayWidget(): JSX.Element {
           </button>
         </div>
 
-        {/* ── Copilot subsystem chips ── */}
+        {/* â”€â”€ Copilot subsystem chips â”€â”€ */}
         {status !== null && (
           <div className="mt-2.5 flex flex-wrap gap-1.5 px-4">
             <span className="chip">
@@ -679,14 +685,14 @@ export function OverlayWidget(): JSX.Element {
               </span>
             )}
             {status.copilot_active && (
-              <span className="chip-violet">
+              <span className="chip-aqua">
                 <Sparkles size={9} /> copilot
               </span>
             )}
           </div>
         )}
 
-        {/* ── Stats strip ── */}
+        {/* â”€â”€ Stats strip â”€â”€ */}
         <div className="mt-2 flex items-center justify-between gap-3 px-4">
           <WpmGauge wpm={wpm} target={targetWpm} />
 
@@ -711,14 +717,14 @@ export function OverlayWidget(): JSX.Element {
           </div>
         </div>
 
-        {/* ── Error banner ── */}
+        {/* â”€â”€ Error banner â”€â”€ */}
         {(sessionError ?? recorder.error) !== null && (
           <p className="mx-4 mt-3 animate-scale-in rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] leading-snug text-rose-300">
             {sessionError ?? recorder.error}
           </p>
         )}
 
-        {/* ── Teleprompter (F4) ── */}
+        {/* â”€â”€ Teleprompter (F4) â”€â”€ */}
         {prompterVisible && (
           <div className="relative mt-3">
             <Teleprompter
@@ -732,7 +738,7 @@ export function OverlayWidget(): JSX.Element {
           </div>
         )}
 
-        {/* ── Copilot dialogue feed ── */}
+        {/* â”€â”€ Copilot dialogue feed â”€â”€ */}
         <div
           ref={feedRef}
           role="log"
@@ -743,8 +749,8 @@ export function OverlayWidget(): JSX.Element {
           {dialogue.length === 0 && ended === null && (
             <div className="flex h-full flex-col items-center justify-center gap-2 py-6 text-center">
               <span className="relative flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-copilot">
-                <span className="absolute inset-0 animate-ping-soft rounded-2xl bg-sky-400/20" />
-                <Sparkles size={18} className="text-sky-300" />
+                <span className="absolute inset-0 animate-ping-soft rounded-2xl bg-amber-400/20" />
+                <Sparkles size={18} className="text-amber-300" />
               </span>
               <p className="text-xs font-semibold text-slate-200">
                 Your copilot is listening
@@ -794,7 +800,37 @@ export function OverlayWidget(): JSX.Element {
                   </p>
                 );
               }
-              // copilot suggestion / answer
+              // The AI/search service failed: show it plainly with a retry.
+              if (entry.kind === "error") {
+                const retryQuestion = [...dialogue]
+                  .reverse()
+                  .find((item) => item.role === "user" && item.id === entry.reply_to);
+                return (
+                  <div
+                    key={entry.id}
+                    className="animate-cue-in rounded-2xl rounded-bl-md border border-amber-400/25 bg-amber-500/[0.08] px-3 py-2.5"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <AlertTriangle size={10} className="text-amber-300" />
+                      <p className="text-[9.5px] font-bold uppercase tracking-widest text-amber-300/90">
+                        Copilot offline
+                      </p>
+                    </div>
+                    <p className="mt-1 text-[12.5px] leading-snug text-amber-50/90">
+                      {entry.text}
+                    </p>
+                    {retryQuestion !== undefined && (
+                      <button
+                        type="button"
+                        onClick={() => askCopilot(retryQuestion.text)}
+                        className="mt-2 rounded-lg border border-amber-300/30 px-2 py-1 text-[10.5px] font-semibold text-amber-200 transition-colors hover:bg-amber-300/10"
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                );
+              }
               const isSuggestion = entry.kind === "suggestion";
               return (
                 <div
@@ -802,19 +838,19 @@ export function OverlayWidget(): JSX.Element {
                   className={cn(
                     "group relative animate-cue-in rounded-2xl rounded-bl-md border px-3 py-2.5 backdrop-blur-md",
                     isSuggestion
-                      ? "border-sky-400/25 bg-gradient-to-br from-sky-500/[0.12] to-transparent"
-                      : "border-violet-400/25 bg-gradient-to-br from-violet-500/[0.12] to-transparent",
+                      ? "border-amber-400/25 bg-gradient-to-br from-amber-500/[0.12] to-transparent"
+                      : "border-yellow-300/20 bg-gradient-to-br from-yellow-400/[0.09] to-transparent",
                   )}
                 >
                   <div className="flex items-center gap-1.5">
                     <Sparkles
                       size={10}
-                      className={isSuggestion ? "text-sky-300" : "text-violet-300"}
+                      className={isSuggestion ? "text-amber-300" : "text-yellow-200"}
                     />
                     <p
                       className={cn(
                         "text-[9.5px] font-bold uppercase tracking-widest",
-                        isSuggestion ? "text-sky-300/90" : "text-violet-300/90",
+                        isSuggestion ? "text-amber-300/90" : "text-yellow-200/90",
                       )}
                     >
                       {isSuggestion ? "Say this" : "Copilot"}
@@ -835,28 +871,49 @@ export function OverlayWidget(): JSX.Element {
                   <p className="mt-1 text-[12.5px] leading-snug text-slate-50">
                     {entry.text}
                     {entry.streaming === true && (
-                      <span className="ml-0.5 inline-block h-3 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-sky-300/80 align-middle" />
+                      <span className="ml-0.5 inline-block h-3 w-1.5 translate-y-0.5 animate-pulse rounded-sm bg-amber-300/80 align-middle" />
                     )}
                   </p>
+                  {entry.sources !== undefined && entry.sources.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1 border-t border-white/[0.06] pt-1.5">
+                      {entry.sources.map((source) => {
+                        const href = safeExternalUrl(source.url);
+                        if (href === null) return null;
+                        return (
+                          <a
+                            key={href}
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={source.title}
+                            className="inline-flex max-w-full items-center gap-1 text-[10px] text-amber-300/80 hover:text-amber-200"
+                          >
+                            <ExternalLink size={9} className="shrink-0" />
+                            <span className="truncate">{source.title}</span>
+                          </a>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* ── Transcript ticker ── */}
+        {/* â”€â”€ Transcript ticker â”€â”€ */}
         {settings.showTranscriptTicker && ended === null && (
           <div className="border-t border-white/5 px-4 py-2">
             <p className="line-clamp-1 text-[11px] leading-relaxed text-slate-400/80">
               {finalLines.length > 0 ? finalLines[finalLines.length - 1] : "—"}
             </p>
-            <p className="line-clamp-1 text-[11px] italic leading-relaxed text-sky-300/70">
+            <p className="line-clamp-1 text-[11px] italic leading-relaxed text-amber-300/70">
               {interimText.length > 0 ? interimText : ""}
             </p>
           </div>
         )}
 
-        {/* ── Ask box (the dialogue input) ── */}
+        {/* â”€â”€ Ask box (the dialogue input) â”€â”€ */}
         {ended === null && (
           <div className="border-t border-white/5 px-4 py-3">
             <form onSubmit={onSubmitDraft} className="flex items-end gap-2">
@@ -869,6 +926,7 @@ export function OverlayWidget(): JSX.Element {
                   }
                 }}
                 rows={1}
+                maxLength={500}
                 placeholder="Ask anything — I hear the call and suggestions appear here..."
                 disabled={wsStatus !== "open"}
                 className="input max-h-24 min-h-[38px] flex-1 resize-none rounded-xl py-2 text-[12.5px] leading-snug"
@@ -888,7 +946,7 @@ export function OverlayWidget(): JSX.Element {
                   key={action.label}
                   onClick={() => askCopilot(action.question)}
                   disabled={wsStatus !== "open"}
-                  className="chip hover:border-sky-400/40 hover:bg-sky-400/10 hover:text-sky-200 disabled:opacity-40"
+                  className="chip hover:border-amber-400/40 hover:bg-amber-400/10 hover:text-amber-200 disabled:opacity-40"
                 >
                   <Sparkles size={9} /> {action.label}
                 </button>
@@ -900,7 +958,7 @@ export function OverlayWidget(): JSX.Element {
           </div>
         )}
 
-        {/* ── Controls / summary ── */}
+        {/* â”€â”€ Controls / summary â”€â”€ */}
         <div className="border-t border-white/5 px-4 py-3">
           {ended !== null ? (
             <div className="animate-fade-in">
@@ -911,9 +969,9 @@ export function OverlayWidget(): JSX.Element {
                 {(
                   [
                     ["Fillers", ended.summary.total_filler_words, "text-amber-300"],
-                    ["Pacing", ended.summary.pacing_alerts, "text-sky-300"],
+                    ["Pacing", ended.summary.pacing_alerts, "text-amber-300"],
                     ["Missed", ended.summary.script_misses, "text-rose-300"],
-                    ["Cards", ended.summary.context_cards, "text-violet-300"],
+                    ["Cards", ended.summary.context_cards, "text-amber-300"],
                   ] as Array<[string, number, string]>
                 ).map(([label, value, color]) => (
                   <div key={label} className="rounded-xl border border-white/5 bg-white/[0.03] py-2.5">
@@ -928,7 +986,7 @@ export function OverlayWidget(): JSX.Element {
               </div>
               {/* Post-session debrief */}
               <div className="mb-3 rounded-xl border border-white/5 bg-white/[0.03] p-3">
-                <p className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-sky-300">
+                <p className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-amber-300">
                   <Sparkles size={11} /> Debrief
                 </p>
                 {debrief === null ? (
@@ -947,7 +1005,7 @@ export function OverlayWidget(): JSX.Element {
                           key={index}
                           className="flex gap-1.5 text-[11.5px] leading-snug text-slate-400"
                         >
-                          <span className="shrink-0 text-sky-400/80">•</span>
+                          <span className="shrink-0 text-amber-400/80">•</span>
                           <span>{tip}</span>
                         </li>
                       ))}
@@ -968,7 +1026,7 @@ export function OverlayWidget(): JSX.Element {
                   className={cn(
                     "flex items-center justify-center gap-1.5 rounded-xl border px-3 py-1.5 text-[11px] font-medium transition-colors",
                     prompterOn
-                      ? "border-sky-400/40 bg-sky-500/10 text-sky-300"
+                      ? "border-amber-400/40 bg-amber-500/10 text-amber-300"
                       : "border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-200",
                   )}
                 >
@@ -1000,7 +1058,7 @@ export function OverlayWidget(): JSX.Element {
                         sessionId === null ||
                         effectiveToken === null
                       }
-                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2.5 text-[12px] font-semibold text-sky-200 transition-colors hover:border-sky-400/50 hover:bg-sky-500/15 disabled:cursor-not-allowed disabled:opacity-40"
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2.5 text-[12px] font-semibold text-amber-200 transition-colors hover:border-amber-400/50 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       <Monitor size={14} /> Share screen + call audio
                     </button>
@@ -1016,7 +1074,7 @@ export function OverlayWidget(): JSX.Element {
                   {screenAvailable && !recorder.screenActive && (
                     <button
                       onClick={() => void startScreen()}
-                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-[11.5px] font-semibold text-sky-200 transition-colors hover:border-sky-400/50 hover:bg-sky-500/15"
+                      className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-[11.5px] font-semibold text-amber-200 transition-colors hover:border-amber-400/50 hover:bg-amber-500/15"
                     >
                       <Monitor size={13} /> Share screen + call audio
                     </button>

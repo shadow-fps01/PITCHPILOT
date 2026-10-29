@@ -78,7 +78,7 @@ export function Teleprompter({
 
   // Amplitude-driven glow for the current reading zone.
   const glow = useMemo(
-    () => `0 0 ${Math.round(8 + micLevel * 18)}px rgba(56, 189, 248, ${0.3 + micLevel * 0.5})`,
+    () => `0 0 ${Math.round(8 + micLevel * 18)}px rgba(251, 191, 36, ${0.3 + micLevel * 0.5})`,
     [micLevel],
   );
   const paceTone =
@@ -86,7 +86,7 @@ export function Teleprompter({
       ? "from-rose-400 to-rose-500"
       : wpm > targetWpm + 25
         ? "from-amber-400 to-amber-500"
-        : "from-sky-400 to-violet-400";
+        : "from-yellow-200 to-amber-400";
 
   if (tokens.length === 0) {
     return (
@@ -124,7 +124,7 @@ export function Teleprompter({
                   key={index}
                   data-index={index}
                   className={cn(
-                    "text-sky-100 transition-all",
+                    "text-amber-100 transition-all",
                     isCurrent &&
                       "font-semibold text-white",
                     isCurrent && stalled && active && "animate-pulse",

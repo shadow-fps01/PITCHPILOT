@@ -1,12 +1,11 @@
-"""Billing service — PitchPilot Plus subscriptions via Paystack.
+"""Billing service  -  PitchPilot Plus subscriptions via Paystack.
 
 Free plan: 3 coaching sessions + 3 scripts per calendar month.
 Plus plan: ₦22,500/month Paystack subscription → unlimited everything.
 
-Provider resolution follows the app's `auto` convention:
-`PAYMENTS_PROVIDER=auto` uses Paystack when `PAYSTACK_SECRET_KEY` is present
-and falls back to an instant mock upgrade (demo mode) otherwise, so the
-whole flow is testable with zero keys.
+Payments always go through Paystack. There is no free/demo upgrade path:
+without `PAYSTACK_SECRET_KEY` checkout returns an explicit 503 and the UI
+shows a retry message, so a missing key can never silently grant Plus.
 """
 
 import asyncio
@@ -32,7 +31,6 @@ from app.models.user import PLAN_FREE, PLAN_PLUS, User
 from app.schemas.billing import BillingStatus
 
 PROVIDER_PAYSTACK = "paystack"
-PROVIDER_DEMO = "demo"
 
 PAYSTACK_BASE_URL = "https://api.paystack.co"
 PLAN_NAME = "PitchPilot Plus (Monthly)"
@@ -56,16 +54,13 @@ _reconcile_last_attempt: dict[uuid.UUID, float] = {}
 
 # ── Provider resolution ────────────────────────────────────────────────
 def resolve_provider(settings: Settings) -> str:
-    """paystack when configured+keyed, demo otherwise (auto convention)."""
-    if settings.payments_provider == PROVIDER_DEMO:
-        return PROVIDER_DEMO
-    if settings.payments_provider == PROVIDER_PAYSTACK:
-        return PROVIDER_PAYSTACK
-    return PROVIDER_PAYSTACK if settings.paystack_secret_key else PROVIDER_DEMO
+    """Paystack is the only provider; kept as a named hook for future ones."""
+    return PROVIDER_PAYSTACK
 
 
 def payments_live(settings: Settings) -> bool:
-    return resolve_provider(settings) == PROVIDER_PAYSTACK
+    """True when checkout can take real money (a key is configured)."""
+    return bool(settings.paystack_secret_key.strip())
 
 
 def paystack_key_mode(settings: Settings) -> str:
@@ -127,7 +122,7 @@ async def sync_plan_expiry(db: AsyncSession, user: User) -> User:
         and user.plus_renews_at is not None
         and not user.is_plus
     ):
-        logger.info(f"Plus subscription expired for {user.email} — downgrading to free")
+        logger.info(f"Plus subscription expired for {user.email}  -  downgrading to free")
         user.plan = PLAN_FREE
         user.plus_cancel_at_period_end = False
         db.add(
@@ -187,6 +182,10 @@ async def assert_session_quota(db: AsyncSession, user: User, settings: Settings)
     user = await sync_plan_expiry(db, user)
     if user.is_plus:
         return
+    # Serialize the quota check with the caller's insert. The row lock is held
+    # until the new session is committed, so concurrent requests cannot all
+    # observe "under the limit" and then insert past it.
+    await db.execute(select(User.id).where(User.id == user.id).with_for_update())
     used = await count_month_sessions(db, user.id)
     if used >= settings.free_monthly_sessions:
         # Last-chance self-heal before the paywall: a paid-but-unprocessed
@@ -200,7 +199,7 @@ async def assert_session_quota(db: AsyncSession, user: User, settings: Settings)
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=(
-                f"Free plan limit reached — you've used all {settings.free_monthly_sessions} "
+                f"Free plan limit reached  -  you've used all {settings.free_monthly_sessions} "
                 f"coaching sessions this month. Upgrade to PitchPilot Plus "
                 f"({settings.plus_price_display}/month) for unlimited sessions."
             ),
@@ -211,6 +210,9 @@ async def assert_script_quota(db: AsyncSession, user: User, settings: Settings) 
     user = await sync_plan_expiry(db, user)
     if user.is_plus:
         return
+    # Same user-row lock as sessions: the check and the script insert commit
+    # together, so parallel creates cannot exceed the free-plan quota.
+    await db.execute(select(User.id).where(User.id == user.id).with_for_update())
     used = await count_month_scripts(db, user.id)
     if used >= settings.free_monthly_scripts:
         # Last-chance self-heal before the paywall (mirrors session quota).
@@ -223,7 +225,7 @@ async def assert_script_quota(db: AsyncSession, user: User, settings: Settings) 
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
             detail=(
-                f"Free plan limit reached — you've used all {settings.free_monthly_scripts} "
+                f"Free plan limit reached  -  you've used all {settings.free_monthly_scripts} "
                 f"script creations this month. Upgrade to PitchPilot Plus "
                 f"({settings.plus_price_display}/month) for unlimited scripts."
             ),
@@ -236,7 +238,7 @@ async def _paystack(
 ) -> dict:
     """Call the Paystack API and return the `data` payload.
 
-    One transparent retry on transport errors — this machine's resolver
+    One transparent retry on transport errors  -  this machine's resolver
     occasionally blips (see README), and checkout must never fail because
     of a single dropped packet.
     """
@@ -255,11 +257,11 @@ async def _paystack(
             break
         except httpx.TransportError as exc:
             last_error = exc
-            logger.warning(f"Paystack call attempt {attempt} failed ({exc}) — retrying")
+            logger.warning(f"Paystack call attempt {attempt} failed ({exc})  -  retrying")
             if attempt == 2:
                 raise PaystackError(f"Could not reach Paystack: {exc}") from exc
             await asyncio.sleep(1.0)
-    else:  # pragma: no cover — loop always breaks or raises
+    else:  # pragma: no cover  -  loop always breaks or raises
         raise PaystackError("Could not reach Paystack")
     body: dict = response.json()
     if not response.is_success or not body.get("status"):
@@ -324,7 +326,7 @@ async def _ensure_plan(settings: Settings) -> str:
         plan_code = data.get("plan_code")
     except PaystackError as exc:
         create_error = str(exc)
-        # Plan name already exists — locate it via the list endpoint.
+        # Plan name already exists  -  locate it via the list endpoint.
         page = 1
         while plan_code is None and page <= 10:
             data = await _paystack(settings, "GET", f"/plan?perPage=100&page={page}")
@@ -349,33 +351,12 @@ async def start_checkout(
 ) -> dict[str, Any]:
     """Begin a Plus upgrade.
 
-    Returns {"mode": "paystack", "authorization_url": …} (redirect the user to
-    Paystack's hosted checkout) or {"mode": "demo", …} when no Paystack key is
-    configured — the demo mode upgrades instantly so the flow is testable.
+    Returns {"mode": "paystack", "authorization_url": ...} to redirect
+    the user to the hosted checkout, or {"mode": "already_plus", ...}
+    when a previous payment was already found and applied.
     """
-    provider = resolve_provider(settings)
-
-    if provider == PROVIDER_DEMO:
-        now = datetime.now(tz=timezone.utc)
-        user.plan = PLAN_PLUS
-        user.plus_started_at = user.plus_started_at or now
-        user.plus_renews_at = now + timedelta(days=30)
-        user.plus_cancel_at_period_end = False
-        db.add(
-            BillingEvent(
-                user_id=user.id,
-                event_type=BillingEventType.SUBSCRIPTION_ACTIVATED,
-                provider=PROVIDER_DEMO,
-                reference=f"plan-{uuid.uuid4().hex[:12]}",
-                amount=settings.plus_price_amount,
-                currency=settings.paystack_currency,
-                message="Plan upgraded",
-            )
-        )
-        await db.commit()
-        await db.refresh(user)
-        logger.info(f"Demo-mode Plus upgrade for {user.email}")
-        return {"mode": PROVIDER_DEMO, "authorization_url": None}
+    if not settings.paystack_secret_key.strip():
+        raise PaystackError("Checkout is not configured")
 
     # Double-charge guard: if a previous Paystack payment was never applied
     # (lost callback / unreachable webhook), activate it instead of taking
@@ -385,7 +366,7 @@ async def start_checkout(
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"Pre-checkout reconciliation skipped for {user.email}: {exc}")
     if user.is_plus:
-        logger.info(f"Checkout skipped — {user.email} is already Plus")
+        logger.info(f"Checkout skipped  -  {user.email} is already Plus")
         return {"mode": "already_plus", "authorization_url": None}
 
     await _ensure_customer(db, user, settings)
@@ -431,64 +412,103 @@ async def start_checkout(
     return {"mode": PROVIDER_PAYSTACK, "authorization_url": authorization_url}
 
 
+async def _resolve_subscription_code(
+    db: AsyncSession, user: User, settings: Settings
+) -> str | None:
+    """Return the user's Paystack subscription code, if one exists.
+
+    Checks the stored code first, then refreshes the stored subscription, then
+    falls back to looking the customer's subscriptions up directly. Returns
+    None only when Paystack genuinely has no subscription for this customer.
+    """
+    if user.paystack_subscription_code:
+        return user.paystack_subscription_code
+
+    await _refresh_subscription(db, user, settings)
+    if user.paystack_subscription_code:
+        return user.paystack_subscription_code
+
+    await _backfill_subscription(db, user, settings)
+    if user.paystack_subscription_code:
+        return user.paystack_subscription_code
+
+    # Last resort: list the customer's subscriptions directly (any status) so
+    # a subscription Paystack knows about but we never stored can be disabled.
+    customer_id = await _fetch_customer_id(db, user, settings)
+    if customer_id is None:
+        return None
+    try:
+        data = await _paystack(
+            settings, "GET", f"/subscription?customer={customer_id}&perPage=50"
+        )
+    except PaystackError as exc:
+        logger.warning(f"Subscription lookup failed for {user.email}: {exc}")
+        return None
+    subscriptions = data if isinstance(data, list) else []
+    for sub in subscriptions:
+        code = sub.get("subscription_code")
+        if not code:
+            continue
+        user.paystack_subscription_code = code
+        user.paystack_email_token = sub.get(
+            "email_token", user.paystack_email_token
+        )
+        await db.commit()
+        return code
+    return None
+
+
 async def cancel_plus(db: AsyncSession, user: User, settings: Settings) -> User:
-    """Cancel Plus. Paystack subscriptions stay active until the period ends;
-    demo/manual upgrades are downgraded immediately."""
-    # A stale subscription code can outlive a local downgrade; never leave it
-    # active (especially during account deletion).
+    """Cancel Plus at Paystack. Idempotent; never fakes a cancellation.
+
+    Always disables the real subscription (at period end) so the next charge
+    cannot happen. Raises ``PaystackError`` when the subscription cannot be
+    resolved or disabled, so the UI shows a retry instead of a false
+    "cancelled" state.
+    """
     if user.plan != PLAN_PLUS and not user.paystack_subscription_code:
         return user
 
-    provider = resolve_provider(settings)
-    if provider == PROVIDER_PAYSTACK:
-        # A first Paystack charge sometimes omits the subscription object.
-        # Recover the active subscription before deciding it is safe to
-        # downgrade/delete the account.
-        if not user.paystack_subscription_code:
-            await _backfill_subscription(db, user, settings)
-        if user.paystack_subscription_code:
-            await _paystack(
-                settings,
-                "POST",
-                "/subscription/disable",
-                {
-                    "code": user.paystack_subscription_code,
-                    "email_token": user.paystack_email_token,
-                },
-            )
-            user.plus_cancel_at_period_end = True
-            message = "Plus subscription cancelled — stays active until the period ends"
-        else:
-            logger.warning(
-                f"No active Paystack subscription found for {user.email} — "
-                "downgrading locally"
-            )
-            user.plan = PLAN_FREE
-            user.plus_cancel_at_period_end = False
-            user.plus_started_at = None
-            user.plus_renews_at = None
-            message = "Plus cancelled — no active subscription found"
-    else:
-        user.plan = PLAN_FREE
-        user.plus_cancel_at_period_end = False
-        user.plus_started_at = None
-        user.plus_renews_at = None
-        message = "Plus cancelled — downgraded immediately"
+    if user.plus_cancel_at_period_end:
+        return user  # already cancelled; keep the period-end state
+
+    code = await _resolve_subscription_code(db, user, settings)
+    if not code:
+        raise PaystackError(f"No Paystack subscription found for {user.email}")
+
+    await _paystack(
+        settings,
+        "POST",
+        "/subscription/disable",
+        {"code": code, "email_token": user.paystack_email_token},
+    )
+
+    # Paystack keeps the subscription active until the paid period ends.
+    user.paystack_subscription_code = code
+    user.plus_cancel_at_period_end = True
+    if user.plus_renews_at is None:
+        try:
+            data = await _paystack(settings, "GET", f"/subscription/{code}")
+            next_payment = _parse_datetime(data.get("next_payment_date"))
+            if next_payment:
+                user.plus_renews_at = next_payment
+        except PaystackError as exc:
+            logger.warning(f"Could not read period end for {user.email}: {exc}")
 
     db.add(
         BillingEvent(
             user_id=user.id,
             event_type=BillingEventType.SUBSCRIPTION_CANCELLED,
-            provider=provider,
-            reference=user.paystack_subscription_code,
+            provider=PROVIDER_PAYSTACK,
+            reference=code,
             amount=settings.plus_price_amount,
             currency=settings.paystack_currency,
-            message=message,
+            message="Plus cancellation requested - active until the period ends",
         )
     )
     await db.commit()
     await db.refresh(user)
-    logger.info(f"Plus cancelled for {user.email}: {message}")
+    logger.info(f"Plus cancellation requested for {user.email} (period-end)")
     return user
 
 
@@ -541,7 +561,7 @@ async def _activate_from_charge(
             amount=data.get("amount"),
             currency=data.get("currency"),
             message="Plus payment received" if not was_plus else "Plus subscription renewed",
-            raw_payload=payload,
+            raw_payload=sanitize_payload(payload),
         )
     )
     await db.commit()
@@ -556,7 +576,7 @@ async def verify_payment(
     db: AsyncSession, user: User, settings: Settings, reference: str
 ) -> dict[str, Any]:
     """Client-driven payment confirmation (fallback for when the Paystack
-    webhook cannot reach the host — e.g. localhost dev).
+    webhook cannot reach the host  -  e.g. localhost dev).
 
     Calls Paystack's transaction verify endpoint; on success the same
     activation logic as the `charge.success` webhook runs (idempotent).
@@ -604,7 +624,7 @@ async def _backfill_subscription(db: AsyncSession, user: User, settings: Setting
 
     The first payment of a Paystack plan subscription often carries no
     `subscription` object in the transaction payload, which would leave
-    `plus_renews_at` unset and break period-end cancellation — pull the
+    `plus_renews_at` unset and break period-end cancellation  -  pull the
     customer's active subscription directly instead.
     """
     if user.paystack_subscription_code:
@@ -635,7 +655,7 @@ async def reconcile_payments(db: AsyncSession, user: User, settings: Settings) -
     """Self-healing Plus activation for unprocessed Paystack payments.
 
     Scans the user's recent successful Paystack charges and runs the standard
-    activation for any PitchPilot Plus payment that was never processed —
+    activation for any PitchPilot Plus payment that was never processed  -
     covering a lost checkout redirect (stripped params, dev server down,
     deployed frontend behind another URL) and webhooks that cannot reach the
     host. Rate-limited per user; returns True when a payment was applied.
@@ -650,7 +670,7 @@ async def reconcile_payments(db: AsyncSession, user: User, settings: Settings) -
 
     customer_id = await _fetch_customer_id(db, user, settings)
     if customer_id is None:
-        logger.debug(f"Reconciliation skipped — no Paystack customer for {user.email}")
+        logger.debug(f"Reconciliation skipped  -  no Paystack customer for {user.email}")
         return False
     data = await _paystack(
         settings,
@@ -699,6 +719,59 @@ def _metadata(data: dict) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def sanitize_payload(payload: dict | None) -> dict | None:
+    """Keep only the fields billing needs; never persist card or customer PII.
+
+    Paystack webhook payloads include an ``authorization`` object (card bin,
+    last4, reusable signature) and a full customer record (email, phone,
+    address). None of that is needed to activate Plus, so it must not reach
+    the database or logs. The original payload is still verified by HMAC
+    before this function is called.
+    """
+    if not isinstance(payload, dict):
+        return None
+    # Accept both a full webhook envelope ({"event": ..., "data": ...}) and a
+    # bare transaction object from older rows or reconciliation calls.
+    if isinstance(payload.get("data"), dict) and "event" in payload:
+        event = payload.get("event")
+        data = payload["data"]
+    else:
+        event = None
+        data = payload
+    customer = data.get("customer")
+    if not isinstance(customer, dict):
+        customer = {}
+    subscription = data.get("subscription")
+    if not isinstance(subscription, dict):
+        subscription = {}
+    meta = _metadata(data)
+    plan = data.get("plan")
+    if isinstance(plan, dict):
+        plan = plan.get("plan_code")
+
+    safe_data = {
+        "reference": data.get("reference"),
+        "amount": data.get("amount"),
+        "currency": data.get("currency"),
+        "status": data.get("status"),
+        "paid_at": data.get("paid_at"),
+        "channel": data.get("channel"),
+        "plan": plan,
+        "customer": {"customer_code": customer.get("customer_code")},
+        "subscription": {
+            key: subscription.get(key)
+            for key in ("subscription_code", "status")
+            if subscription.get(key) is not None
+        },
+        "metadata": {
+            key: meta.get(key)
+            for key in ("user_id", "purpose")
+            if meta.get(key) is not None
+        },
+    }
+    return {"event": event, "data": safe_data}
+
+
 async def _find_user(db: AsyncSession, data: dict) -> User | None:
     meta = _metadata(data)
     user_id = meta.get("user_id")
@@ -742,13 +815,25 @@ async def _refresh_subscription(db: AsyncSession, user: User, settings: Settings
     next_payment = _parse_datetime(data.get("next_payment_date"))
     if next_payment:
         user.plus_renews_at = next_payment
+    now = datetime.now(tz=timezone.utc)
+    access_until = user.plus_renews_at if user.plus_cancel_at_period_end else None
     if sub_status == "active":
         user.plan = PLAN_PLUS
-        user.plus_cancel_at_period_end = False
+        # A disabled subscription keeps reporting "active" until the paid
+        # period ends. Never clear the cancellation flag in that window.
+        if access_until is None or access_until <= now:
+            user.plus_cancel_at_period_end = False
     elif sub_status in ("cancelled", "completed", "expired", "non-renewing"):
         if sub_status == "non-renewing":
             user.plus_cancel_at_period_end = True
-        elif next_payment is None or next_payment <= datetime.now(tz=timezone.utc):
+        elif user.plus_cancel_at_period_end:
+            # Honours a cancellation already made through us.
+            if user.plus_renews_at is not None and user.plus_renews_at > now:
+                user.plan = PLAN_PLUS
+            else:
+                user.plan = PLAN_FREE
+                user.plus_cancel_at_period_end = False
+        elif next_payment is None or next_payment <= now:
             user.plan = PLAN_FREE
             user.plus_cancel_at_period_end = False
     await db.commit()
@@ -782,13 +867,13 @@ async def process_webhook(
             return True, "No matching user"
         result = await _activate_from_charge(db, settings, user, data, payload)
         if result == "duplicate":
-            return True, "Duplicate charge.success — already processed"
+            return True, "Duplicate charge.success  -  already processed"
 
     elif event in ("subscription.create", "subscription.enable"):
         sub = data.get("subscription") or {}
         reference = sub.get("subscription_code")
         if await _event_seen(db, BillingEventType.SUBSCRIPTION_ACTIVATED, reference):
-            return True, "Duplicate subscription event — already processed"
+            return True, "Duplicate subscription event  -  already processed"
         user = await _find_user(db, data)
         if user is None:
             logger.warning(f"{event} webhook: no matching PitchPilot user")
@@ -817,7 +902,7 @@ async def process_webhook(
                 amount=sub.get("amount"),
                 currency=(data.get("plan") or {}).get("currency"),
                 message="Plus subscription updated",
-                raw_payload=payload,
+                raw_payload=sanitize_payload(payload),
             )
         )
         await db.commit()
@@ -828,7 +913,7 @@ async def process_webhook(
         sub = data.get("subscription") or {}
         reference = sub.get("subscription_code")
         if await _event_seen(db, BillingEventType.SUBSCRIPTION_CANCELLED, reference):
-            return True, "Duplicate subscription.disable — already processed"
+            return True, "Duplicate subscription.disable  -  already processed"
         user = await _find_user(db, data)
         if user is None:
             logger.warning("subscription.disable webhook: no matching PitchPilot user")
@@ -837,14 +922,23 @@ async def process_webhook(
         next_payment = _parse_datetime(sub.get("next_payment_date"))
         if next_payment:
             user.plus_renews_at = next_payment
+        elif user.plus_renews_at is None:
+            # Paystack sometimes omits the period end in the webhook; without
+            # it, access would never end. Treat "now" as the boundary.
+            user.plus_renews_at = datetime.now(tz=timezone.utc)
+        if user.plus_renews_at is None or user.plus_renews_at <= datetime.now(
+            tz=timezone.utc
+        ):
+            user.plan = PLAN_FREE
+            user.plus_cancel_at_period_end = False
         db.add(
             BillingEvent(
                 user_id=user.id,
                 event_type=BillingEventType.SUBSCRIPTION_CANCELLED,
                 provider=provider,
                 reference=reference,
-                message="Plus subscription disabled — ends at the period boundary",
-                raw_payload=payload,
+                message="Plus subscription disabled  -  ends at the period boundary",
+                raw_payload=sanitize_payload(payload),
             )
         )
         await db.commit()

@@ -23,7 +23,7 @@ import { ApiError, authApi } from "@/lib/api";
 import { LegalLinks } from "@/components/LegalLinks";
 import { Logo } from "@/components/ui/Logo";
 import { Waveform } from "@/components/ui/Waveform";
-import { cn } from "@/lib/utils";
+import { cn, clearUrlToken, readUrlToken } from "@/lib/utils";
 
 type AuthMode = "login" | "register" | "forgot" | "reset";
 
@@ -47,8 +47,7 @@ const HIGHLIGHTS = [
 
 function resetTokenFromUrl(): string | null {
   try {
-    const token = new URLSearchParams(window.location.search).get("reset");
-    return token !== null && token.length > 0 ? token : null;
+    return readUrlToken("reset");
   } catch {
     return null;
   }
@@ -60,9 +59,6 @@ export function AuthForm(): JSX.Element {
   const [mode, setMode] = useState<AuthMode>(
     initialResetToken === null ? "login" : "reset",
   );
-  // Hidden until we know the deployment can actually deliver the link. This
-  // avoids promising an email while account email is switched off.
-  const [emailAvailable, setEmailAvailable] = useState<boolean | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -76,34 +72,9 @@ export function AuthForm(): JSX.Element {
   // effects) can see the token and drop any stale signed-in session first.
   useEffect(() => {
     if (initialResetToken === null) return;
-    const timer = window.setTimeout(() => {
-      const params = new URLSearchParams(window.location.search);
-      if (!params.has("reset")) return;
-      params.delete("reset");
-      const query = params.toString();
-      window.history.replaceState(
-        {},
-        "",
-        `${window.location.pathname}${query.length > 0 ? `?${query}` : ""}${window.location.hash}`,
-      );
-    }, 0);
+    const timer = window.setTimeout(() => clearUrlToken("reset"), 0);
     return () => window.clearTimeout(timer);
   }, [initialResetToken]);
-
-  useEffect(() => {
-    let cancelled = false;
-    authApi
-      .emailAvailability()
-      .then((result) => {
-        if (!cancelled) setEmailAvailable(result.available);
-      })
-      .catch(() => {
-        if (!cancelled) setEmailAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   const isAux = mode === "forgot" || mode === "reset";
   const showEmail = mode !== "reset";
@@ -123,9 +94,11 @@ export function AuthForm(): JSX.Element {
     setError(null);
     setInfo(null);
 
-    if (mode === "forgot" && emailAvailable === false) {
-      setError("Password recovery is temporarily unavailable. Please try again later.");
-      return;
+    if (mode === "register" || mode === "reset") {
+      if (password.length < 12) {
+        setError("Use at least 12 characters for your password.");
+        return;
+      }
     }
 
     if (mode === "reset") {
@@ -144,7 +117,14 @@ export function AuthForm(): JSX.Element {
       if (mode === "login") {
         await login(email, password);
       } else if (mode === "register") {
-        await register(email, password);
+        const result = await register(email, password);
+        setMode("login");
+        setPassword("");
+        setConfirmPassword("");
+        setInfo(
+          result.message ||
+            "Account created. Check your email if confirmation is required, then sign in.",
+        );
       } else if (mode === "forgot") {
         await authApi.forgotPassword(email);
         setInfo(
@@ -152,6 +132,7 @@ export function AuthForm(): JSX.Element {
         );
       } else {
         await authApi.resetPassword(initialResetToken!, password);
+        clearUrlToken("reset");
         setInfo("Password updated. Sign in with your new password.");
         setMode("login");
         setPassword("");
@@ -210,11 +191,11 @@ export function AuthForm(): JSX.Element {
           {/* live "listening" preview */}
           <div className="panel mt-8 flex items-center gap-4 p-4">
             <span className="relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-copilot">
-              <span className="absolute inset-0 animate-ping-soft rounded-xl bg-sky-400/20" />
+              <span className="absolute inset-0 animate-ping-soft rounded-xl bg-amber-400/20" />
               <Waveform active level={0.68} bars={5} />
             </span>
             <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-widest text-sky-300">
+              <p className="text-xs font-semibold uppercase tracking-widest text-amber-300">
                 Listening
               </p>
               <p className="truncate text-sm text-slate-300">
@@ -226,7 +207,7 @@ export function AuthForm(): JSX.Element {
           <ul className="mt-8 flex flex-col gap-4">
             {HIGHLIGHTS.map(({ icon: Icon, title, body }) => (
               <li key={title} className="flex items-start gap-3">
-                <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-sky-300">
+                <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-amber-300">
                   <Icon size={16} />
                 </span>
                 <div>
@@ -272,12 +253,6 @@ export function AuthForm(): JSX.Element {
                     ? "Enter the email you signed up with and we'll send a single-use reset link."
                     : "Use a password you haven't used elsewhere. This link can only be used once."}
                 </p>
-                {mode === "forgot" && emailAvailable === false && (
-                  <p className="mt-2 rounded-xl border border-amber-300/20 bg-amber-300/10 px-3 py-2 text-xs leading-relaxed text-amber-100/80">
-                    Password recovery is temporarily unavailable. Please try again
-                    later.
-                  </p>
-                )}
               </div>
             ) : (
               <Tabs.Root
@@ -334,11 +309,11 @@ export function AuthForm(): JSX.Element {
                 <label className="relative block">
                   <span className="flex items-center justify-between">
                     <span className="field-label !mb-0">Password</span>
-                    {mode === "login" && emailAvailable === true && (
+                    {mode === "login" && (
                       <button
                         type="button"
                         onClick={() => switchMode("forgot")}
-                        className="mb-1.5 text-[11px] font-medium text-sky-300 transition-colors hover:text-sky-200"
+                        className="mb-1.5 text-[11px] font-medium text-amber-300 transition-colors hover:text-amber-200"
                       >
                         Forgot password?
                       </button>
@@ -352,12 +327,12 @@ export function AuthForm(): JSX.Element {
                     <input
                       type={showPassword ? "text" : "password"}
                       required
-                      minLength={8}
+                      minLength={mode === "login" ? 1 : 12}
                       autoComplete={
                         mode === "login" ? "current-password" : "new-password"
                       }
                       placeholder={
-                        mode === "login" ? "Your password" : "At least 8 characters"
+                        mode === "login" ? "Your password" : "At least 12 characters"
                       }
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
@@ -372,6 +347,11 @@ export function AuthForm(): JSX.Element {
                       {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
                     </button>
                   </span>
+                  {mode !== "login" && (
+                    <span className="mt-1.5 block text-[10.5px] leading-relaxed text-slate-500">
+                      12+ characters. Avoid common passwords and your name or email.
+                    </span>
+                  )}
                 </label>
               )}
 
@@ -386,7 +366,7 @@ export function AuthForm(): JSX.Element {
                     <input
                       type={showPassword ? "text" : "password"}
                       required
-                      minLength={8}
+                      minLength={12}
                       autoComplete="new-password"
                       placeholder="Repeat your new password"
                       value={confirmPassword}
