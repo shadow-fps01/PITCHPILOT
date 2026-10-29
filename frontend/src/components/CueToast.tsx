@@ -11,10 +11,10 @@ const SEVERITY_STYLE: Record<
   { border: string; icon: string; body: string; bar: string }
 > = {
   info: {
-    border: "border-sky-400/30",
-    icon: "bg-sky-400/15 text-sky-300",
-    body: "text-sky-50",
-    bar: "bg-sky-400",
+    border: "border-amber-400/30",
+    icon: "bg-amber-400/15 text-amber-300",
+    body: "text-amber-50",
+    bar: "bg-amber-400",
   },
   warn: {
     border: "border-amber-400/40",

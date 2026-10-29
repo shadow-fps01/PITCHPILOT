@@ -23,13 +23,14 @@ def azure_stt_configured(settings: Settings) -> bool:
 def resolve_stt_choice(settings: Settings) -> str:
     """Decide which provider name is in effect.
 
-    Explicit choices win (`azure` | `deepgram` | `openai` | `groq` | `mock`);
-    otherwise `auto` picks the first provider with a configured key —
-    Deepgram → Groq → Azure OpenAI → OpenAI Realtime — and falls back to the
-    mock demo speaker only when NO transcription key is available.
+    Explicit choices win (`azure` | `deepgram` | `openai` | `groq`).
+    Otherwise `auto` picks the first provider with a configured key  -
+    Deepgram → Groq → Azure OpenAI → OpenAI Realtime. When nothing is
+    configured the session reports transcription as unavailable; there is no
+    simulated-speaker fallback.
     """
     choice = settings.stt_provider.strip().lower()
-    if choice in ("azure", "deepgram", "openai", "groq", "mock"):
+    if choice in ("azure", "deepgram", "openai", "groq"):
         return choice
     if settings.deepgram_api_key:
         return "deepgram"
@@ -39,7 +40,7 @@ def resolve_stt_choice(settings: Settings) -> str:
         return "azure"
     if settings.openai_api_key:
         return "openai"
-    return "mock"
+    return "none"
 
 
 def build_stt_provider(
@@ -51,12 +52,9 @@ def build_stt_provider(
 
     if name == "azure":
         if not azure_stt_configured(settings):
-            logger.warning(
-                "Azure OpenAI STT selected but AZURE_OPENAI_API_KEY, "
-                "AZURE_OPENAI_ENDPOINT or AZURE_OPENAI_STT_DEPLOYMENT is "
-                "missing — using the mock provider for this session"
+            raise STTUnavailable(
+                "Transcription is not configured for this session"
             )
-            return MockSTT(on_transcript), "mock"
         return (
             AzureBatchSTT(
                 on_transcript,
@@ -85,10 +83,15 @@ def build_stt_provider(
             ),
             name,
         )
-    return MockSTT(on_transcript), name
+    raise STTUnavailable("No live transcription provider is configured")
+
+
+class STTUnavailable(Exception):
+    """No transcription backend is configured or reachable for this session."""
 
 
 __all__ = [
+    "STTUnavailable",
     "STTProvider",
     "TranscriptCallback",
     "TranscriptChunk",

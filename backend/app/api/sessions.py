@@ -25,6 +25,7 @@ from app.schemas.session import (
     SessionSummary,
 )
 from app.services.billing import assert_session_quota
+from app.services.rate_limit import consume_daily_budget
 from app.services.session_registry import registry
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -71,6 +72,19 @@ async def create_session(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Script not found"
             )
         script_id = script.id
+
+    budget = await consume_daily_budget(
+        "sessions", current_user.id, get_settings().daily_session_limit
+    )
+    if not budget.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Daily coaching-session limit reached. "
+                "Please try again tomorrow."
+            ),
+            headers={"Retry-After": str(max(1, int(budget.retry_after) + 1))},
+        )
 
     # started_at is stamped here (not at WS connect) to keep the live
     # stream handshake down to two DB round-trips.

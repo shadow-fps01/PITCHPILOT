@@ -19,8 +19,8 @@ interface WaveformProps {
 }
 
 const TONE: Record<NonNullable<WaveformProps["tone"]>, string> = {
-  brand: "bg-gradient-to-t from-sky-400 to-violet-400",
-  emerald: "bg-gradient-to-t from-emerald-400 to-teal-300",
+  brand: "bg-gradient-to-t from-amber-400 to-amber-300",
+  emerald: "bg-gradient-to-t from-emerald-400 to-emerald-300",
   gold: "bg-gradient-to-t from-amber-400 to-yellow-300",
 };
 

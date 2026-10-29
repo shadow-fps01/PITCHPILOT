@@ -25,7 +25,7 @@ from app.models.coaching_session import CoachingSession
 from app.models.script import Script
 from app.schemas.stream import SessionSummarySchema
 from app.services.ai_coach import AICoach
-from app.services.copilot_chat import CopilotChat, build_copilot_llm
+from app.services.copilot_chat import CopilotChat, build_copilot_llm, build_web_search
 from app.services.llm_client import get_llm_client
 
 
@@ -43,6 +43,9 @@ class LiveSessionState:
     context_cards: int = 0  # surfaced cards this session (for the end summary)
     copilot: CopilotChat | None = None  # Cluely-style dialogue engine
     screen_worker: "ScreenVisionWorker | None" = None  # client-shared screen frames
+    # Per-session copilot ask budget; survives reconnects.
+    ask_count: int = 0
+    last_ask_at: float = -1e9
 
 
 class LiveSessionRegistry:
@@ -101,6 +104,7 @@ class LiveSessionRegistry:
                 outline=script.content_outline if script else "",
                 keywords=list(script.keywords) if script else [],
                 llm=build_copilot_llm(settings),
+                search=build_web_search(settings),
                 screen_provider=(
                     vision_worker.latest_context if vision_worker is not None else None
                 ),
@@ -188,11 +192,11 @@ class LiveSessionRegistry:
                     db_session.ended_at = datetime.now(tz=timezone.utc)
                     db_session.duration_seconds = duration_seconds
                     await db.commit()
-        except Exception as exc:  # noqa: BLE001 — persistence must not crash finalize
+        except Exception as exc:  # noqa: BLE001  -  persistence must not crash finalize
             logger.warning(f"Failed to persist session end for {session_id}: {exc}")
 
         logger.info(
-            f"Session {session_id} finalized — {duration_seconds}s, "
+            f"Session {session_id} finalized  -  {duration_seconds}s, "
             f"{summary.total_filler_words} fillers, {summary.pacing_alerts} pacing alerts"
         )
         return summary
@@ -225,6 +229,9 @@ class LiveSessionRegistry:
 
     def active_count(self) -> int:
         return len(self._states)
+
+    def active_for_user(self, user_id: uuid.UUID) -> int:
+        return sum(1 for state in self._states.values() if state.user_id == user_id)
 
 
 # Module-level singleton used by the stream endpoint.

@@ -45,7 +45,7 @@ function Row({
   return (
     <div className="flex flex-col gap-4 rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:gap-6">
       <div className="flex items-start gap-3">
-        <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-sky-300">
+        <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-amber-300">
           <Icon size={15} />
         </span>
         <div>
@@ -85,7 +85,7 @@ function SliderControl({
       <Slider.Track className="relative h-1.5 w-full grow rounded-full bg-white/10">
         <Slider.Range className="absolute h-full rounded-full bg-gradient-brand" />
       </Slider.Track>
-      <Slider.Thumb className="block h-4 w-4 rounded-full border-2 border-white bg-sky-500 shadow-glow transition-transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-sky-500/30" />
+      <Slider.Thumb className="block h-4 w-4 rounded-full border-2 border-white bg-amber-500 shadow-glow transition-transform hover:scale-110 focus:outline-none focus:ring-4 focus:ring-amber-500/30" />
     </Slider.Root>
   );
 }
@@ -191,6 +191,10 @@ export function SettingsForm(): JSX.Element {
     setPasswordError(null);
     setPasswordInfo(null);
 
+    if (newPassword.length < 12) {
+      setPasswordError("Use at least 12 characters for your new password.");
+      return;
+    }
     if (newPassword !== confirmPassword) {
       setPasswordError("Those new passwords do not match.");
       return;
@@ -263,7 +267,7 @@ export function SettingsForm(): JSX.Element {
         <h2 className="mb-3 text-xs font-semibold uppercase tracking-widest text-slate-400">
           Preview
         </h2>
-        <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-sky-500/10 via-violet-500/10 to-transparent p-6">
+        <div className="relative overflow-hidden rounded-2xl border border-white/10 bg-gradient-to-br from-amber-500/10 via-amber-500/10 to-transparent p-6">
           <div
             className="mx-auto max-w-[320px] rounded-2xl border border-white/10 p-3 shadow-panel backdrop-blur-xl transition-colors"
             style={{ backgroundColor: `rgba(6, 10, 22, ${settings.overlayOpacity})` }}
@@ -278,13 +282,13 @@ export function SettingsForm(): JSX.Element {
             </div>
             <p className="mt-2 text-[12.5px] text-slate-200">
               ⚠ Ease off — you're at{" "}
-              <span className="font-semibold text-sky-300">178 WPM</span>
+              <span className="font-semibold text-amber-300">178 WPM</span>
             </p>
             <p className="mt-1 text-[11px] text-slate-400">
               fillers: 4 · next up: pricing
             </p>
             {settings.showTranscriptTicker && (
-              <p className="mt-2 line-clamp-1 border-t border-white/5 pt-2 text-[10px] italic text-sky-300/70">
+              <p className="mt-2 line-clamp-1 border-t border-white/5 pt-2 text-[10px] italic text-amber-300/70">
                 “...so the pricing tiers start at forty nine dollars...”
               </p>
             )}
@@ -393,7 +397,7 @@ export function SettingsForm(): JSX.Element {
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-xl">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-3">
-              <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-sky-300">
+              <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-amber-300">
                 <Mail size={15} />
               </span>
               <div>
@@ -434,7 +438,7 @@ export function SettingsForm(): JSX.Element {
 
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] p-4 backdrop-blur-xl">
           <div className="flex items-start gap-3">
-            <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-sky-300">
+            <span className="mt-0.5 rounded-xl border border-white/10 bg-white/[0.04] p-2 text-amber-300">
               <KeyRound size={15} />
             </span>
             <div>
@@ -465,11 +469,11 @@ export function SettingsForm(): JSX.Element {
                 <input
                   type="password"
                   required
-                  minLength={8}
+                  minLength={12}
                   autoComplete="new-password"
                   value={newPassword}
                   onChange={(event) => setNewPassword(event.target.value)}
-                  placeholder="At least 8 characters"
+                  placeholder="At least 12 characters"
                   className="input"
                 />
               </label>
@@ -478,7 +482,7 @@ export function SettingsForm(): JSX.Element {
                 <input
                   type="password"
                   required
-                  minLength={8}
+                  minLength={12}
                   autoComplete="new-password"
                   value={confirmPassword}
                   onChange={(event) => setConfirmPassword(event.target.value)}
@@ -505,8 +509,8 @@ export function SettingsForm(): JSX.Element {
                 disabled={
                   passwordBusy ||
                   currentPassword.length === 0 ||
-                  newPassword.length < 8 ||
-                  confirmPassword.length < 8
+                  newPassword.length < 12 ||
+                  confirmPassword.length < 12
                 }
                 className="btn-outline text-xs"
               >

@@ -1,12 +1,12 @@
 """LLM clients powering the Contextual Script Auditor.
 
 The auditor periodically reviews the recent transcript against the user's
-outline/keywords and reports which talking points are still missing. Three
-backends are supported:
+outline/keywords and reports which talking points are still missing.
 
-- Azure OpenAI (chat completions)
-- OpenRouter (OpenAI-compatible API)
-- A local heuristic auditor (keyword matching) that always works, no keys needed.
+gpt-4o on Azure OpenAI is the primary and expected backend. OpenRouter is an
+optional failover. There is **no keyless/heuristic fallback**: if no backend
+is usable the app surfaces an explicit ``AIUnavailable`` error and the live
+session shows that the coach is offline instead of inventing cues.
 """
 
 import json
@@ -37,6 +37,14 @@ _SYSTEM_PROMPT = (
 )
 
 
+class AIUnavailable(Exception):
+    """No configured AI backend could produce a result. Surface, don't fake."""
+
+    def __init__(self, message: str = "The AI service is unavailable right now") -> None:
+        super().__init__(message)
+        self.message = message
+
+
 @dataclass(frozen=True)
 class ScriptAuditResult:
     covered: list[str] = field(default_factory=list)
@@ -58,7 +66,11 @@ class LLMClient(ABC):
 
     @abstractmethod
     async def audit_transcript(self, request: ScriptAuditRequest) -> ScriptAuditResult:
-        """Analyse the recent transcript against the outline; never raises."""
+        """Analyse the recent transcript against the outline.
+
+        Raises ``AIUnavailable`` when the backend cannot answer  -  callers turn
+        that into a visible coaching-offline state.
+        """
 
 
 def _build_user_prompt(request: ScriptAuditRequest) -> str:
@@ -99,7 +111,9 @@ def _parse_audit_json(raw: str) -> ScriptAuditResult:
 
 
 class AzureOpenAIClient(LLMClient):
-    """Chat-completions client for Azure OpenAI resources."""
+    """Chat-completions client for Azure OpenAI resources (gpt-4o)."""
+
+    name = "azure-gpt-4o"
 
     def __init__(self, api_key: str, endpoint: str, deployment: str, api_version: str) -> None:
         self._url = (
@@ -126,13 +140,17 @@ class AzureOpenAIClient(LLMClient):
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 return _parse_audit_json(content)
-        except Exception as exc:  # noqa: BLE001 — auditor must never break the stream
+        except Exception as exc:  # noqa: BLE001  -  surface, never invent
             logger.warning(f"Azure script audit failed: {exc}")
-            return ScriptAuditResult()
+            raise AIUnavailable(
+                "The script coach is offline right now"
+            ) from exc
 
 
 class OpenRouterClient(LLMClient):
-    """OpenAI-compatible client for OpenRouter."""
+    """OpenAI-compatible failover client for OpenRouter."""
+
+    name = "openrouter"
 
     def __init__(self, api_key: str, model: str) -> None:
         self._url = "https://openrouter.ai/api/v1/chat/completions"
@@ -161,51 +179,32 @@ class OpenRouterClient(LLMClient):
                 return _parse_audit_json(content)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"OpenRouter script audit failed: {exc}")
-            return ScriptAuditResult()
+            raise AIUnavailable(
+                "The script coach is offline right now"
+            ) from exc
 
 
-class HeuristicAuditor(LLMClient):
-    """Keyless fallback auditor: tracks keyword mentions across the session."""
+def get_llm_client(settings: Settings) -> LLMClient | None:
+    """Primary gpt-4o backend, with OpenRouter only as explicit failover.
 
-    def __init__(self) -> None:
-        import re
-
-        self._keyword_patterns: dict[str, re.Pattern[str]] = {}
-
-    async def audit_transcript(self, request: ScriptAuditRequest) -> ScriptAuditResult:
-        import re
-
-        covered = set(request.already_covered)
-        missed: list[str] = []
-        for keyword in request.keywords:
-            if keyword not in self._keyword_patterns:
-                self._keyword_patterns[keyword] = re.compile(
-                    rf"\b{re.escape(keyword.strip())}\b", re.IGNORECASE
-                )
-            if self._keyword_patterns[keyword].search(request.recent_transcript):
-                covered.add(keyword)
-            elif keyword not in covered:
-                missed.append(keyword)
-        cue: str | None = None
-        if missed:
-            cue = f"Don't forget to mention: {', '.join(missed[:3])}"
-        return ScriptAuditResult(covered=sorted(covered), missed=missed[:6], cue=cue)
-
-
-def get_llm_client(settings: Settings) -> LLMClient:
-    """Pick the auditor backend from settings, with graceful auto-detection."""
-    provider = settings.llm_provider.lower()
-    if provider == "azure" or (
-        provider == "auto" and settings.azure_openai_api_key and settings.azure_openai_endpoint
-    ):
+    Returns ``None`` when nothing is configured; the caller must then show
+    the coaching as unavailable rather than generating fake cues.
+    """
+    provider = settings.llm_provider.strip().lower()
+    azure_ready = bool(
+        settings.azure_openai_api_key.strip()
+        and settings.azure_openai_endpoint.strip()
+    )
+    if provider in ("azure", "auto") and azure_ready:
         return AzureOpenAIClient(
-            api_key=settings.azure_openai_api_key,
-            endpoint=settings.azure_openai_endpoint,
-            deployment=settings.azure_openai_chat_deployment,
+            api_key=settings.azure_openai_api_key.strip(),
+            endpoint=settings.azure_openai_endpoint.strip(),
+            deployment=settings.azure_openai_chat_deployment.strip() or "gpt-4o",
             api_version=settings.azure_openai_api_version,
         )
-    if provider == "openrouter" or (provider == "auto" and settings.openrouter_api_key):
+    if settings.openrouter_api_key.strip() and provider in ("openrouter", "auto"):
         return OpenRouterClient(
-            api_key=settings.openrouter_api_key, model=settings.openrouter_model
+            api_key=settings.openrouter_api_key.strip(),
+            model=settings.openrouter_model,
         )
-    return HeuristicAuditor()
+    return None

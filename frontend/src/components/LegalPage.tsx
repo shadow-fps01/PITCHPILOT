@@ -305,7 +305,7 @@ function SectionBlock({ section }: { section: Section }): JSX.Element {
               key={bullet}
               className="flex gap-2 text-[13px] leading-relaxed text-slate-400"
             >
-              <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400/70" />
+              <span className="mt-[7px] h-1.5 w-1.5 shrink-0 rounded-full bg-amber-400/70" />
               <span>{bullet}</span>
             </li>
           ))}
@@ -334,14 +334,14 @@ function SupportContact({ email }: { email: string }): JSX.Element {
   };
 
   return (
-    <div className="mt-5 rounded-2xl border border-sky-400/20 bg-sky-400/[0.06] p-4">
+    <div className="mt-5 rounded-2xl border border-amber-400/20 bg-amber-400/[0.06] p-4">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="rounded-xl border border-sky-400/20 bg-sky-400/10 p-2 text-sky-300">
+        <span className="rounded-xl border border-amber-400/20 bg-amber-400/10 p-2 text-amber-300">
           <Mail size={16} />
         </span>
         <a
           href={`mailto:${email}`}
-          className="text-sm font-semibold text-sky-200 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-100"
+          className="text-sm font-semibold text-amber-200 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-100"
         >
           {email}
         </a>
@@ -388,7 +388,7 @@ export function LegalPage({ view }: { view: LegalView }): JSX.Element {
 
       <article className="panel p-6 sm:p-8">
         <div className="flex items-start gap-3">
-          <span className="rounded-2xl border border-sky-400/20 bg-sky-400/10 p-2.5 text-sky-300">
+          <span className="rounded-2xl border border-amber-400/20 bg-amber-400/10 p-2.5 text-amber-300">
             {view === "support" ? <LifeBuoy size={20} /> : <ShieldCheck size={20} />}
           </span>
           <div>
@@ -413,7 +413,7 @@ export function LegalPage({ view }: { view: LegalView }): JSX.Element {
             Questions about this page?{" "}
             <a
               href={`mailto:${supportEmail}`}
-              className="font-semibold text-sky-300 underline decoration-sky-300/40 underline-offset-2 hover:text-sky-200"
+              className="font-semibold text-amber-300 underline decoration-amber-300/40 underline-offset-2 hover:text-amber-200"
             >
               Contact support
             </a>

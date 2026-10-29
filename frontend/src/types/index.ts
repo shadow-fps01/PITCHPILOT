@@ -33,10 +33,6 @@ export interface EmailVerificationStatus {
   sent: boolean;
 }
 
-export interface EmailAvailability {
-  available: boolean;
-}
-
 export interface MessageResponse {
   message: string;
 }
@@ -45,7 +41,7 @@ export interface MessageResponse {
 export interface BillingStatus {
   plan: Plan;
   is_plus: boolean;
-  provider: "paystack" | "demo";
+  provider: "paystack";
   payments_live: boolean;
   price_display: string;
   price_amount: number;
@@ -63,7 +59,7 @@ export interface BillingStatus {
 }
 
 export interface CheckoutResponse {
-  mode: "paystack" | "demo" | "already_plus";
+  mode: "paystack" | "already_plus";
   authorization_url: string | null;
   status: BillingStatus;
 }
@@ -239,7 +235,13 @@ export type ClientMessage =
   | { type: "tune"; sensitivity: CueSensitivity };
 
 // ── Copilot dialogue (Cluely-style) ─────────────────────────────────────
-export type CopilotKind = "suggestion" | "answer" | "status";
+export type CopilotKind = "suggestion" | "answer" | "status" | "error";
+
+/** One web source backing a copilot answer. */
+export interface CopilotSource {
+  title: string;
+  url: string;
+}
 
 /** A copilot dialogue message pushed by the server. */
 export interface CopilotMessage {
@@ -250,6 +252,7 @@ export interface CopilotMessage {
   trigger: string | null;
   reply_to: string | null;
   screen_used: boolean;
+  sources: CopilotSource[];
 }
 
 /** Incremental tokens while the copilot composes an answer (`text` = total so far). */
@@ -282,6 +285,7 @@ export interface SessionStatusMessage {
   vision_active: boolean;
   anticipation_active: boolean;
   copilot_active: boolean;
+  search_active: boolean;
 }
 
 /** Native dual-audio capture lifecycle (mic + system loopback). */
@@ -330,7 +334,10 @@ export interface DialogueEntry {
   /** Copilot message kind (suggestion / answer / status). */
   kind?: CopilotKind;
   trigger?: string | null;
+  /** ID of the user message this copilot reply/error answers. */
+  reply_to?: string | null;
   screenUsed?: boolean;
+  sources?: CopilotSource[];
   receivedAt: number;
   /** True while the copilot is generating a reply to this user message. */
   pending?: boolean;

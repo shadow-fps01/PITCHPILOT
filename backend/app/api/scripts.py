@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_email_verified
 from app.config.settings import get_settings
 from app.db.session import get_db
 from app.models.script import Script
@@ -45,7 +45,7 @@ async def list_scripts(
 @router.post("", response_model=ScriptPublic, status_code=status.HTTP_201_CREATED)
 async def create_script(
     payload: ScriptCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_email_verified),
     db: AsyncSession = Depends(get_db),
 ) -> Script:
     # Plus-only quota: free members create 3 scripts per month (402 → paywall)
@@ -84,7 +84,7 @@ async def get_script(
 async def update_script(
     script_id: uuid.UUID,
     payload: ScriptUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_email_verified),
     db: AsyncSession = Depends(get_db),
 ) -> Script:
     script = await _get_owned_script(script_id, current_user, db)

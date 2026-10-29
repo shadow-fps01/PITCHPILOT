@@ -9,7 +9,6 @@ import type {
   BillingStatus,
   CheckoutResponse,
   CoachingSession,
-  EmailAvailability,
   EmailVerificationStatus,
   MessageResponse,
   Script,
@@ -61,6 +60,47 @@ export function setStoredToken(token: string | null): void {
   }
 }
 
+/**
+ * Turn a FastAPI error body into a single readable sentence. `detail` can be a
+ * string (HTTPException) or a list of validation objects (422 responses).
+ */
+function extractDetail(body: unknown): string | null {
+  if (typeof body !== "object" || body === null || !("detail" in body)) {
+    return null;
+  }
+  const detail = (body as { detail: unknown }).detail;
+  if (typeof detail === "string") {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item): string | null => {
+        if (
+          typeof item !== "object" ||
+          item === null ||
+          !("msg" in item) ||
+          typeof (item as { msg: unknown }).msg !== "string"
+        ) {
+          return null;
+        }
+        const message = (item as { msg: string }).msg;
+        const loc = (item as { loc?: unknown }).loc;
+        if (Array.isArray(loc)) {
+          const path = loc
+            .filter((part): part is string => typeof part === "string")
+            .join(".");
+          return path.length > 0 ? `${path}: ${message}` : message;
+        }
+        return message;
+      })
+      .filter((message): message is string => message !== null);
+    if (messages.length > 0) {
+      return messages.join("; ");
+    }
+  }
+  return null;
+}
+
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -79,13 +119,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     let detail = response.statusText;
     try {
       const body: unknown = await response.json();
-      if (
-        typeof body === "object" &&
-        body !== null &&
-        "detail" in body &&
-        typeof (body as { detail: unknown }).detail === "string"
-      ) {
-        detail = (body as { detail: string }).detail;
+      const parsed = extractDetail(body);
+      if (parsed !== null) {
+        detail = parsed;
       }
     } catch {
       /* non-JSON error body — keep statusText */
@@ -100,8 +136,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 // ── Auth ─────────────────────────────────────────────────────────────────
 export const authApi = {
-  register: (email: string, password: string): Promise<AuthResponse> =>
-    request<AuthResponse>("/auth/register", {
+  /** Registration always returns the same generic 202 response. */
+  register: (email: string, password: string): Promise<MessageResponse> =>
+    request<MessageResponse>("/auth/register", {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
@@ -114,9 +151,13 @@ export const authApi = {
 
   me: (): Promise<User> => request<User>("/auth/me"),
 
-  /** Whether this deployment can send password-reset and verification email. */
-  emailAvailability: (): Promise<EmailAvailability> =>
-    request<EmailAvailability>("/auth/email-available"),
+  /** Revoke this session's token server-side (best effort). */
+  logout: (): Promise<void> =>
+    request<void>("/auth/logout", { method: "POST" }),
+
+  /** Revoke every session for the account. */
+  logoutAll: (): Promise<void> =>
+    request<void>("/auth/logout-all", { method: "POST" }),
 
   /** Confirm an email address from the link sent at registration. */
   verifyEmail: (token: string): Promise<User> =>
@@ -172,8 +213,12 @@ export const authApi = {
       body: JSON.stringify({ password }),
     }),
 
-  /** Short-lived credential for the WebSocket handshake. */
-  wsTicket: (): Promise<WsTicket> => request<WsTicket>("/auth/ws-ticket", { method: "POST" }),
+  /** Short-lived credential for one session's WebSocket handshake. */
+  wsTicket: (sessionId: string): Promise<WsTicket> =>
+    request<WsTicket>("/auth/ws-ticket", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId }),
+    }),
 };
 
 // ── Scripts ──────────────────────────────────────────────────────────────

@@ -35,6 +35,35 @@ function httpOrigin(value) {
 }
 
 /**
+ * Only http(s) URLs may reach the OS browser or a child window. In particular
+ * this blocks `file:`, `javascript:`, `data:` and custom protocol handlers,
+ * which could otherwise be used to launch local programs from remote content.
+ */
+function isSafeWebUrl(value) {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+    if (parsed.username.length > 0 || parsed.password.length > 0) {
+      return false;
+    }
+    return parsed.hostname.length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isPaystackUrl(value) {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === "paystack.com" || hostname.endsWith(".paystack.com");
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Hosted checkout must never inherit the overlay's 460x780 transparent,
  * always-on-top canvas. Open it in a normal, full-sized window that shares
  * the Electron session (so the callback still has the signed-in token).
@@ -65,23 +94,36 @@ function createCheckoutWindow(url, parent) {
 
   // Bank / 3-D Secure flows sometimes open a popup from the checkout page.
   // Let it open in a normal window (sharing this session) rather than a tiny
-  // default Electron popup, and preserve the opener relationship.
-  checkout.webContents.setWindowOpenHandler(() => ({
-    action: "allow",
-    overrideBrowserWindowOptions: {
-      width: 900,
-      height: 800,
-      frame: true,
-      transparent: false,
-      backgroundColor: "#ffffff",
-      alwaysOnTop: false,
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
+  // default Electron popup, and preserve the opener relationship. Only web
+  // URLs are allowed; remote checkout content must never open file:// or a
+  // custom protocol.
+  checkout.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (!isSafeWebUrl(target)) {
+      return { action: "deny" };
+    }
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        width: 900,
+        height: 800,
+        frame: true,
+        transparent: false,
+        backgroundColor: "#ffffff",
+        alwaysOnTop: false,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+        },
       },
-    },
-  }));
+    };
+  });
+
+  checkout.webContents.on("will-navigate", (event, target) => {
+    if (!isSafeWebUrl(target)) {
+      event.preventDefault();
+    }
+  });
 
   if (parent !== undefined && parent !== null && !parent.isDestroyed()) {
     // The protected overlay is always-on-top; hide it so it cannot cover the
@@ -123,7 +165,9 @@ function createProtectedWindow(url) {
   win.setContentProtection(true);
   win.setAlwaysOnTop(true, "screen-saver");
 
-  if (url.startsWith("http")) {
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    win.loadURL(url);
+  } else if (url.startsWith("file://")) {
     win.loadURL(url);
   } else {
     win.loadFile(url, { query: { view: "live" } });
@@ -134,7 +178,10 @@ function createProtectedWindow(url) {
   // that leaves the app origin and hand it to a normal checkout window.
   const appOrigin = httpOrigin(url);
   win.webContents.on("will-navigate", (event, target) => {
-    if (!target.startsWith("http://") && !target.startsWith("https://")) {
+    // Never let remote content navigate this privileged window to file://,
+    // javascript:, data: or a custom protocol.
+    if (!isSafeWebUrl(target)) {
+      event.preventDefault();
       return;
     }
     const targetOrigin = httpOrigin(target);
@@ -142,28 +189,29 @@ function createProtectedWindow(url) {
       return; // in-app navigation (e.g. ?view=live)
     }
     event.preventDefault();
-    createCheckoutWindow(target, win);
+    if (isPaystackUrl(target)) {
+      createCheckoutWindow(target, win);
+    } else {
+      void shell.openExternal(target);
+    }
   });
 
   // Same-origin popups (e.g. "Detached overlay window") open as additional
   // protected windows; anything external goes to the system browser. A
-  // Paystack popup gets the full-sized checkout window instead.
+  // Paystack popup gets the full-sized checkout window instead. Unsafe
+  // protocols are dropped entirely.
   win.webContents.setWindowOpenHandler(({ url: target }) => {
-    try {
-      const parsed = new URL(target);
-      if (parsed.hostname === "checkout.paystack.com") {
-        createCheckoutWindow(target, win);
-        return { action: "deny" };
-      }
-      if (
-        parsed.hostname === "localhost" ||
-        parsed.hostname === "127.0.0.1"
-      ) {
-        createProtectedWindow(`${parsed.origin}/`);
-        return { action: "deny" };
-      }
-    } catch {
-      /* fall through to external */
+    if (!isSafeWebUrl(target)) {
+      return { action: "deny" };
+    }
+    const parsed = new URL(target);
+    if (appOrigin !== null && parsed.origin === appOrigin) {
+      createProtectedWindow(target);
+      return { action: "deny" };
+    }
+    if (isPaystackUrl(target)) {
+      createCheckoutWindow(target, win);
+      return { action: "deny" };
     }
     void shell.openExternal(target);
     return { action: "deny" };

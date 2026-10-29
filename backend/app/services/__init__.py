@@ -3,7 +3,7 @@
 from app.services.ai_coach import AICoach
 from app.services.audio_processor import TranscriptAnalytics
 from app.services.llm_client import (
-    HeuristicAuditor,
+    AIUnavailable,
     LLMClient,
     ScriptAuditRequest,
     ScriptAuditResult,
@@ -35,7 +35,7 @@ __all__ = [
     "AICoach",
     "DeepgramLiveSTT",
     "GroqBatchSTT",
-    "HeuristicAuditor",
+    "AIUnavailable",
     "LLMClient",
     "LiveSessionRegistry",
     "LiveSessionState",

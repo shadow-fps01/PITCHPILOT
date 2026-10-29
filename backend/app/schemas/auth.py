@@ -3,12 +3,19 @@
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from app.services.passwords import validate_password_strength
 
 
 class RegisterRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def _strong_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class LoginRequest(BaseModel):
@@ -43,10 +50,10 @@ class VerificationStatus(BaseModel):
     sent: bool = False
 
 
-class EmailAvailability(BaseModel):
-    """Whether the deployment can currently deliver account emails."""
+class WsTicketRequest(BaseModel):
+    """The ticket is bound to the session it will be used for."""
 
-    available: bool = False
+    session_id: uuid.UUID
 
 
 class WsTicketResponse(BaseModel):
@@ -60,12 +67,22 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str = Field(min_length=10, max_length=4096)
-    password: str = Field(min_length=8, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("password")
+    @classmethod
+    def _strong_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(min_length=8, max_length=128)
+    new_password: str = Field(min_length=12, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def _strong_password(cls, value: str) -> str:
+        return validate_password_strength(value)
 
 
 class AccountDeleteRequest(BaseModel):
